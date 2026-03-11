@@ -2,14 +2,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
+from datetime import datetime
 from pathlib import Path
+from textwrap import dedent
 
 import pandas as pd
 from plotly.offline import get_plotlyjs
 
 
-COLOR_UP = "#c65a2e"
-COLOR_DOWN = "#1f6f5f"
+SOURCE_LABELS = {
+    "disclosure": "公司公告",
+    "research": "券商研报",
+    "news": "个股新闻",
+    "web_news": "外部媒体",
+}
 
 
 def classify_impact(score: float) -> str:
@@ -28,10 +35,67 @@ def format_pct(value: float | None, digits: int = 2) -> str:
     return f"{value * 100:.{digits}f}%"
 
 
-def load_payload(project_root: Path) -> dict[str, object]:
+def render_nav(current_page: str) -> str:
+    items = [
+        ("index.html", "总览", "home"),
+        ("news.html", "新闻", "news"),
+        ("model.html", "模型", "model"),
+        ("fundamentals.html", "基本面", "fundamentals"),
+    ]
+    links: list[str] = []
+    for href, label, page in items:
+        active = " active" if page == current_page else ""
+        links.append(f'<a class="nav-link{active}" href="{href}">{label}</a>')
+    return "".join(links)
+
+
+def render_head(title: str, page: str) -> str:
+    return dedent(
+        f"""\
+        <!DOCTYPE html>
+        <html lang="zh-CN">
+        <head>
+          <meta charset="utf-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=1" />
+          <title>{title}</title>
+          <link rel="stylesheet" href="assets/styles.css" />
+          <script defer src="assets/plotly.min.js"></script>
+          <script defer src="assets/app.js"></script>
+        </head>
+        <body data-page="{page}">
+          <div class="app-shell">
+            <header class="topbar">
+              <div>
+                <p class="eyebrow">EASPRING 300073</p>
+                <h1>当升科技跟踪 Dashboard</h1>
+                <p class="subtle">股价、新闻、模型与基本面，每个工作日自动刷新一次。</p>
+              </div>
+              <nav class="topnav">{render_nav(page)}</nav>
+            </header>
+        """
+    )
+
+
+def render_footer() -> str:
+    return dedent(
+        """\
+            <footer class="footer">
+              <p>数据源包含日线行情、公司公告、券商研报、外部媒体和季度财务摘要。页面为静态前端站点，非实时盘中系统。</p>
+            </footer>
+          </div>
+        </body>
+        </html>
+        """
+    )
+
+
+def build_snapshot_payload(project_root: Path) -> dict[str, object]:
     metrics = json.loads((project_root / "reports" / "metrics.json").read_text(encoding="utf-8"))
     prices = pd.read_csv(project_root / "data" / "raw" / "stock_prices.csv", parse_dates=["date"])
-    benchmark = pd.read_csv(project_root / "data" / "raw" / "benchmark_prices.csv", parse_dates=["date"])
+    benchmark = pd.read_csv(
+        project_root / "data" / "raw" / "benchmark_prices.csv",
+        parse_dates=["date"],
+    )
     news = pd.read_csv(
         project_root / "data" / "processed" / "company_news.csv",
         parse_dates=["timestamp", "effective_date"],
@@ -41,1071 +105,1445 @@ def load_payload(project_root: Path) -> dict[str, object]:
         parse_dates=["报告日", "公告日期", "effective_timestamp", "effective_date"],
     )
 
-    source_labels = {
-        "disclosure": "公司公告",
-        "research": "券商研报",
-        "news": "个股新闻",
-        "web_news": "外部媒体",
-    }
-    news["source_label"] = news["source_type"].map(source_labels).fillna(news["source_type"])
+    prices = prices.sort_values("date").reset_index(drop=True)
+    benchmark = benchmark.sort_values("date").reset_index(drop=True)
+    news = news.sort_values("timestamp", ascending=False).reset_index(drop=True)
+    quarterly = quarterly.sort_values("报告日").reset_index(drop=True)
+
+    news["body"] = news["body"].fillna("")
+    news["source_label"] = news["source_type"].map(SOURCE_LABELS).fillna(news["source_type"])
     news["impact"] = news["sentiment_score"].apply(classify_impact)
-    news["body"] = news["body"].fillna("").astype(str).str.replace(r"\s+", " ", regex=True).str.slice(0, 160)
+    news["month"] = news["effective_date"].dt.strftime("%Y-%m")
+    news["timestamp_label"] = news["timestamp"].dt.strftime("%Y-%m-%d %H:%M")
+    news["effective_label"] = news["effective_date"].dt.strftime("%Y-%m-%d")
+    news["body_excerpt"] = news["body"].str.replace(r"\s+", " ", regex=True).str.slice(0, 220)
+
+    perf = prices[["date", "close"]].merge(
+        benchmark[["date", "benchmark_close"]],
+        on="date",
+        how="left",
+    )
+    perf["stock_index"] = perf["close"] / perf["close"].iloc[0] * 100
+    perf["benchmark_index"] = perf["benchmark_close"] / perf["benchmark_close"].iloc[0] * 100
+    rolling_high = prices["close"].cummax()
+    drawdown = prices["close"] / rolling_high - 1
+    latest_close = float(prices["close"].iloc[-1])
+    latest_date = prices["date"].iloc[-1]
+    last_20_start = max(len(prices) - 21, 0)
+    change_20d = prices["close"].iloc[-1] / prices["close"].iloc[last_20_start] - 1
+    relative_return = perf["stock_index"].iloc[-1] / perf["benchmark_index"].iloc[-1] - 1
+    news_counts = news["impact"].value_counts().to_dict()
+    positive_item = news.sort_values("sentiment_score", ascending=False).head(1)
+    negative_item = news.sort_values("sentiment_score", ascending=True).head(1)
+    classification = metrics.get("classification", {})
+    regression = metrics.get("regression", {})
+    forecast = metrics.get("forecast", {})
+    selected_metrics = classification.get("selected_metrics", {})
+    regression_metrics = regression.get("selected_metrics", {})
+    updated_at = datetime.now().astimezone().isoformat(timespec="seconds")
+
+    latest_quarterly = quarterly[quarterly["effective_date"] <= latest_date].tail(8).copy()
+    if latest_quarterly.empty:
+        latest_quarterly = quarterly.tail(8).copy()
 
     return {
+        "generated_at": updated_at,
+        "generated_at_label": datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z"),
         "metrics": metrics,
-        "prices": prices.sort_values("date").reset_index(drop=True),
-        "benchmark": benchmark.sort_values("date").reset_index(drop=True),
-        "news": news.sort_values("timestamp", ascending=False).reset_index(drop=True),
-        "quarterly": quarterly.sort_values("报告日").reset_index(drop=True),
-    }
-
-
-def metric_card(label: str, value: str, detail: str) -> str:
-    return f"""
-    <div class="metric-card">
-      <div class="metric-label">{label}</div>
-      <div class="metric-value">{value}</div>
-      <div class="metric-detail">{detail}</div>
-    </div>
-    """
-
-
-def build_snapshot_payload(payload: dict[str, object]) -> dict[str, object]:
-    prices = payload["prices"].copy()
-    benchmark = payload["benchmark"].copy()
-    news = payload["news"].copy()
-    quarterly = payload["quarterly"].copy()
-    metrics = payload["metrics"]
-
-    return {
-        "metrics": {
-            "forecast": metrics["forecast"],
-            "data_summary": metrics["data_summary"],
-            "descriptive_summary": metrics["descriptive_summary"],
+        "summary": {
+            "latest_close": latest_close,
+            "latest_date": latest_date.strftime("%Y-%m-%d"),
+            "change_20d": float(change_20d),
+            "relative_return": float(relative_return),
+            "max_drawdown": float(drawdown.min()),
+            "news_total": int(len(news)),
+            "news_days": int(metrics.get("data_summary", {}).get("news_days", news["effective_date"].nunique())),
+            "classification_accuracy": selected_metrics.get("accuracy"),
+            "classification_balanced_accuracy": selected_metrics.get("balanced_accuracy"),
+            "classification_auc": selected_metrics.get("roc_auc"),
+            "classification_baseline": classification.get("baseline_accuracy"),
+            "regression_mae": regression_metrics.get("mae"),
+            "regression_rmse": regression_metrics.get("rmse"),
+            "regression_r2": regression_metrics.get("r2"),
+            "positive_news_count": int(news_counts.get("偏利多", 0)),
+            "neutral_news_count": int(news_counts.get("中性", 0)),
+            "negative_news_count": int(news_counts.get("偏利空", 0)),
+        },
+        "signal": {
+            "signal_date": forecast.get("signal_date"),
+            "next_session_date": forecast.get("next_session_date"),
+            "latest_close": forecast.get("latest_close"),
+            "up_probability": forecast.get("next_up_probability"),
+            "predicted_return": forecast.get("predicted_return"),
+            "label": forecast.get("label"),
+        },
+        "highlights": {
+            "positive_event": positive_item[
+                ["timestamp_label", "source_label", "impact", "title", "source_link", "sentiment_score"]
+            ]
+            .to_dict(orient="records"),
+            "negative_event": negative_item[
+                ["timestamp_label", "source_label", "impact", "title", "source_link", "sentiment_score"]
+            ]
+            .to_dict(orient="records"),
+        },
+        "models": {
             "classification": {
-                "selected_model": metrics["classification"]["selected_model"],
-                "selected_metrics": metrics["classification"]["selected_metrics"],
-                "baseline_accuracy": metrics["classification"]["baseline_accuracy"],
-                "candidates": metrics["classification"]["candidates"],
-                "feature_importance": metrics["classification"]["feature_importance"][:12],
+                "selected_model": classification.get("selected_model"),
+                "baseline_accuracy": classification.get("baseline_accuracy"),
+                "candidates": classification.get("candidates", []),
+                "selected_metrics": classification.get("selected_metrics", {}),
+                "feature_importance": classification.get("feature_importance", [])[:15],
             },
             "regression": {
-                "selected_model": metrics["regression"]["selected_model"],
-                "selected_metrics": metrics["regression"]["selected_metrics"],
+                "selected_model": regression.get("selected_model"),
+                "candidates": regression.get("candidates", []),
+                "selected_metrics": regression.get("selected_metrics", {}),
+                "ridge_equation": regression.get("ridge_equation"),
             },
-            "config": metrics["config"],
         },
-        "prices": prices.assign(date=prices["date"].dt.strftime("%Y-%m-%d"))[
-            ["date", "close", "volume", "pct_change"]
-        ].to_dict("records"),
-        "benchmark": benchmark.assign(date=benchmark["date"].dt.strftime("%Y-%m-%d"))[
-            ["date", "benchmark_close"]
-        ].to_dict("records"),
-        "news": news.assign(
-            timestamp=news["timestamp"].dt.strftime("%Y-%m-%d %H:%M"),
-            effective_date=news["effective_date"].dt.strftime("%Y-%m-%d"),
-        )[
-            ["timestamp", "effective_date", "source_label", "source_type", "impact", "title", "source_link", "sentiment_score", "body"]
-        ].to_dict("records"),
-        "quarterly": quarterly.assign(报告日=quarterly["报告日"].dt.strftime("%Y-%m-%d"))[
-            ["报告日", "fin_revenue", "fin_net_profit", "fin_gross_margin", "fin_net_margin", "fin_roe", "fin_debt_ratio", "fin_revenue_yoy", "fin_profit_yoy"]
-        ].to_dict("records"),
+        "prices": [
+            {
+                "date": row.date.strftime("%Y-%m-%d"),
+                "close": float(row.close),
+                "volume": float(row.volume),
+                "pct_change": float(row.pct_change),
+                "stock_index": float(stock_index),
+                "benchmark_index": float(benchmark_index),
+            }
+            for row, stock_index, benchmark_index in zip(
+                prices.itertuples(index=False),
+                perf["stock_index"],
+                perf["benchmark_index"],
+            )
+        ],
+        "quarterly": [
+            {
+                "report_date": row.报告日.strftime("%Y-%m-%d"),
+                "revenue": None if pd.isna(row.fin_revenue) else float(row.fin_revenue),
+                "net_profit": None if pd.isna(row.fin_net_profit) else float(row.fin_net_profit),
+                "gross_margin": None if pd.isna(row.fin_gross_margin) else float(row.fin_gross_margin),
+                "net_margin": None if pd.isna(row.fin_net_margin) else float(row.fin_net_margin),
+                "roe": None if pd.isna(row.fin_roe) else float(row.fin_roe),
+                "debt_ratio": None if pd.isna(row.fin_debt_ratio) else float(row.fin_debt_ratio),
+                "revenue_yoy": None if pd.isna(row.fin_revenue_yoy) else float(row.fin_revenue_yoy),
+                "profit_yoy": None if pd.isna(row.fin_profit_yoy) else float(row.fin_profit_yoy),
+                "announce_date": row.公告日期.strftime("%Y-%m-%d") if not pd.isna(row.公告日期) else None,
+            }
+            for row in latest_quarterly.itertuples(index=False)
+        ],
+        "news": [
+            {
+                "timestamp": row.timestamp_label,
+                "effective_date": row.effective_label,
+                "month": row.month,
+                "source_label": row.source_label,
+                "source_type": row.source_type,
+                "impact": row.impact,
+                "title": row.title,
+                "source_link": row.source_link,
+                "source_name": row.source_name,
+                "sentiment_score": None if pd.isna(row.sentiment_score) else float(row.sentiment_score),
+                "body_excerpt": row.body_excerpt,
+            }
+            for row in news.itertuples(index=False)
+        ],
     }
 
 
-def render_snapshot(project_root: Path, output_path: Path | None = None) -> Path:
-    payload = load_payload(project_root)
-    metrics = payload["metrics"]
-    prices = payload["prices"]
-    news = payload["news"]
-    latest_date = prices["date"].max()
-    generated_at = pd.to_datetime(metrics["config"]["generated_at"])
-    recent_news_count = int((news["timestamp"] >= latest_date - pd.Timedelta(days=7)).sum())
-
-    cards = [
-        metric_card("最新收盘价", f"{metrics['forecast']['latest_close']:.2f}", f"截至 {latest_date:%Y-%m-%d}"),
-        metric_card("两年累计涨幅", format_pct(metrics["descriptive_summary"]["stock_total_return"]), "当升科技前复权区间表现"),
-        metric_card("相对创业板", format_pct(metrics["descriptive_summary"]["excess_return_vs_benchmark"]), f"创业板区间 {format_pct(metrics['descriptive_summary']['benchmark_total_return'])}"),
-        metric_card("次日上涨概率", f"{metrics['forecast']['next_up_probability'] * 100:.1f}%", f"模型标签: {metrics['forecast']['label']}"),
-        metric_card("次日预测收益", format_pct(metrics["forecast"]["predicted_return"]), "仅作辅助，不是交易指令"),
-        metric_card("最近 7 天消息", str(recent_news_count), f"PDF 正文 {metrics['data_summary']['pdf_extract_ok']} 份"),
-    ]
-
-    payload_json = json.dumps(build_snapshot_payload(payload), ensure_ascii=False).replace("</", "<\\/")
-    plotly_js = get_plotlyjs()
-
-    html = """
-    <!doctype html>
-    <html lang="zh-CN">
-    <head>
-      <meta charset="utf-8" />
-      <meta name="viewport" content="width=device-width, initial-scale=1" />
-      <title>当升科技每日看板</title>
-      <style>
+def build_stylesheet() -> str:
+    return dedent(
+        """\
         :root {
+          --bg: #f4efe6;
+          --panel: #fbf8f3;
+          --line: #d8cfc0;
+          --text: #161a18;
+          --muted: #59635e;
           --up: #c65a2e;
           --down: #1f6f5f;
-          --ink: #1d2320;
-          --muted: #58606b;
-          --line: #d8cfc0;
-          --paper: #fbf8f3;
-          --bg: #f4efe6;
+          --neutral: #58606b;
+          --shadow: 0 18px 50px rgba(86, 96, 107, 0.08);
+          --radius: 22px;
         }
+
+        * {
+          box-sizing: border-box;
+        }
+
         body {
           margin: 0;
-          font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans SC", "Microsoft YaHei", sans-serif;
-          color: var(--ink);
+          font-family: "Avenir Next", "PingFang SC", "Noto Serif SC", serif;
+          color: var(--text);
           background:
-            radial-gradient(circle at top right, rgba(198,90,46,0.10), transparent 20%),
-            radial-gradient(circle at top left, rgba(31,111,95,0.10), transparent 18%),
-            linear-gradient(180deg, var(--bg) 0%, #f7f4ed 50%, #f0e9de 100%);
+            radial-gradient(circle at top right, rgba(198, 90, 46, 0.10), transparent 24%),
+            radial-gradient(circle at top left, rgba(31, 111, 95, 0.10), transparent 18%),
+            linear-gradient(180deg, #f3eee4 0%, #f8f5ef 46%, #f1ebdf 100%);
         }
-        .page {
-          max-width: 1280px;
+
+        a {
+          color: inherit;
+          text-decoration: none;
+        }
+
+        .app-shell {
+          max-width: 1380px;
           margin: 0 auto;
-          padding: 24px 18px 48px;
+          padding: 20px 18px 36px;
         }
-        .hero, .panel {
-          background: rgba(251,248,243,0.92);
-          border: 1px solid var(--line);
-          border-radius: 22px;
-          box-shadow: 0 14px 40px rgba(86,96,107,0.07);
-        }
-        .hero {
-          padding: 22px 24px;
+
+        .topbar {
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 18px;
           margin-bottom: 18px;
         }
-        .kicker {
-          color: var(--down);
-          font-size: 12px;
-          font-weight: 700;
-          letter-spacing: 0.08em;
+
+        .topbar h1 {
+          margin: 0.18rem 0 0.3rem;
+          font-size: clamp(1.9rem, 4vw, 2.7rem);
+          line-height: 1.05;
+        }
+
+        .eyebrow {
+          margin: 0;
+          font-size: 0.8rem;
+          letter-spacing: 0.12em;
           text-transform: uppercase;
+          font-weight: 700;
+          color: var(--down);
         }
-        .hero h1 {
-          margin: 8px 0 10px;
-          font-size: 34px;
-          line-height: 1.08;
+
+        .subtle {
+          margin: 0;
+          color: var(--muted);
+          font-size: 0.95rem;
         }
-        .subtitle {
+
+        .topnav {
+          display: flex;
+          gap: 10px;
+          flex-wrap: wrap;
+          justify-content: flex-end;
+        }
+
+        .nav-link {
+          padding: 10px 14px;
+          border-radius: 999px;
+          border: 1px solid var(--line);
+          background: rgba(251, 248, 243, 0.9);
+          color: #38413d;
+          font-size: 0.92rem;
+          font-weight: 700;
+        }
+
+        .nav-link.active {
+          background: linear-gradient(135deg, rgba(198, 90, 46, 0.12), rgba(31, 111, 95, 0.08));
+          border-color: rgba(198, 90, 46, 0.35);
+        }
+
+        .banner {
+          margin-bottom: 16px;
+          padding: 14px 16px;
+          border-radius: 16px;
+          border: 1px solid var(--line);
+          background: rgba(251, 248, 243, 0.9);
+          box-shadow: var(--shadow);
+          display: none;
+        }
+
+        .banner.show {
+          display: block;
+        }
+
+        .banner.warning {
+          border-color: rgba(198, 90, 46, 0.35);
+          background: rgba(252, 241, 235, 0.95);
+        }
+
+        .hero,
+        .panel {
+          border: 1px solid var(--line);
+          border-radius: var(--radius);
+          background: rgba(251, 248, 243, 0.93);
+          box-shadow: var(--shadow);
+        }
+
+        .hero {
+          padding: 18px 20px;
+          margin-bottom: 16px;
+        }
+
+        .hero-grid {
+          display: grid;
+          grid-template-columns: 1.5fr 1fr;
+          gap: 18px;
+          align-items: center;
+        }
+
+        .hero-title {
+          margin: 0;
+          font-size: 2rem;
+          line-height: 1.1;
+        }
+
+        .hero-meta {
+          color: var(--muted);
+          margin-top: 10px;
+        }
+
+        .signal-meter {
+          border-radius: 22px;
+          padding: 18px;
+          background: linear-gradient(160deg, rgba(198, 90, 46, 0.14), rgba(31, 111, 95, 0.08) 82%);
+          border: 1px solid rgba(198, 90, 46, 0.22);
+        }
+
+        .signal-meter .label {
+          font-size: 0.78rem;
+          letter-spacing: 0.12em;
+          text-transform: uppercase;
+          color: var(--muted);
+          font-weight: 700;
+        }
+
+        .signal-meter .value {
+          font-size: clamp(2rem, 4vw, 3rem);
+          line-height: 1;
+          margin-top: 8px;
+          font-weight: 700;
+        }
+
+        .signal-meter .detail {
+          margin-top: 10px;
+          color: #39403d;
+        }
+
+        .grid {
+          display: grid;
+          gap: 16px;
+        }
+
+        .grid-4 {
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+        }
+
+        .grid-3 {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+
+        .grid-2 {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .metric-card {
+          padding: 16px;
+          min-height: 126px;
+        }
+
+        .metric-label {
+          color: var(--muted);
+          font-size: 0.84rem;
+          margin-bottom: 10px;
+        }
+
+        .metric-value {
+          font-size: 1.8rem;
+          line-height: 1.05;
+          font-weight: 700;
+          margin-bottom: 8px;
+        }
+
+        .metric-detail {
+          font-size: 0.9rem;
           color: #4d5652;
-          font-size: 15px;
-          line-height: 1.6;
-          max-width: 900px;
         }
+
+        .panel {
+          padding: 18px 18px 14px;
+        }
+
+        .panel h2,
+        .panel h3 {
+          margin-top: 0;
+          margin-bottom: 0.35rem;
+        }
+
+        .panel-subtitle {
+          color: var(--muted);
+          margin: 0 0 14px;
+          font-size: 0.9rem;
+        }
+
+        .controls {
+          display: flex;
+          gap: 10px;
+          flex-wrap: wrap;
+          margin-bottom: 14px;
+        }
+
+        .button-group {
+          display: inline-flex;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+
+        .button {
+          border: 1px solid var(--line);
+          border-radius: 999px;
+          padding: 8px 12px;
+          background: white;
+          color: #38413d;
+          font: inherit;
+          cursor: pointer;
+        }
+
+        .button.active {
+          background: linear-gradient(135deg, rgba(198, 90, 46, 0.14), rgba(31, 111, 95, 0.10));
+          border-color: rgba(198, 90, 46, 0.35);
+        }
+
+        select {
+          border-radius: 14px;
+          border: 1px solid var(--line);
+          padding: 9px 12px;
+          background: #fff;
+          color: #37403c;
+          font: inherit;
+        }
+
+        .chart {
+          min-height: 340px;
+        }
+
+        .news-list,
+        .highlight-list,
+        .watch-list {
+          display: grid;
+          gap: 12px;
+        }
+
+        .news-card,
+        .highlight-card {
+          border: 1px solid var(--line);
+          border-radius: 18px;
+          padding: 14px 15px;
+          background: rgba(255, 255, 255, 0.75);
+        }
+
         .pill-row {
           display: flex;
           flex-wrap: wrap;
-          gap: 10px;
-          margin-top: 14px;
+          gap: 8px;
+          margin-bottom: 8px;
         }
+
         .pill {
-          padding: 8px 12px;
-          border: 1px solid var(--line);
-          border-radius: 999px;
-          background: rgba(255,255,255,0.70);
-          font-size: 13px;
-          color: #49524e;
-        }
-        .status-banner {
-          display: none;
-          margin: 0 0 18px;
-          padding: 14px 16px;
-          border-radius: 18px;
-          border: 1px solid var(--line);
-          font-size: 14px;
-          line-height: 1.6;
-          box-shadow: 0 10px 24px rgba(86,96,107,0.06);
-        }
-        .status-banner.ok {
-          display: block;
-          background: rgba(31,111,95,0.10);
-          border-color: rgba(31,111,95,0.30);
-          color: #234a40;
-        }
-        .status-banner.warn {
-          display: block;
-          background: rgba(198,90,46,0.10);
-          border-color: rgba(198,90,46,0.35);
-          color: #6d3f25;
-        }
-        .cards {
-          display: grid;
-          grid-template-columns: repeat(3, minmax(0, 1fr));
-          gap: 14px;
-          margin-bottom: 18px;
-        }
-        .metric-card {
-          border-radius: 18px;
-          border: 1px solid var(--line);
-          background: rgba(255,255,255,0.86);
-          padding: 14px 16px;
-          min-height: 112px;
-        }
-        .metric-label {
-          color: #5a625d;
-          font-size: 13px;
-          margin-bottom: 6px;
-        }
-        .metric-value {
-          font-size: 29px;
-          font-weight: 700;
-          margin-bottom: 4px;
-        }
-        .metric-detail {
-          color: #56615d;
-          font-size: 13px;
-        }
-        .toolbar {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 10px;
-          align-items: center;
-          margin: 0 0 12px;
-        }
-        .segment {
           display: inline-flex;
-          border: 1px solid var(--line);
+          align-items: center;
+          gap: 6px;
+          padding: 4px 10px;
           border-radius: 999px;
-          overflow: hidden;
-          background: rgba(255,255,255,0.76);
-        }
-        .segment button {
-          border: 0;
-          background: transparent;
-          color: #49524e;
-          padding: 9px 14px;
-          cursor: pointer;
-          font-size: 13px;
-        }
-        .segment button.active {
-          background: var(--down);
-          color: white;
-        }
-        .select {
           border: 1px solid var(--line);
-          border-radius: 12px;
-          padding: 9px 12px;
-          background: rgba(255,255,255,0.82);
-          color: var(--ink);
-          font-size: 13px;
+          font-size: 0.76rem;
+          font-weight: 700;
+          background: rgba(255, 255, 255, 0.7);
         }
-        .grid-2 {
-          display: grid;
-          grid-template-columns: repeat(2, minmax(0, 1fr));
-          gap: 16px;
-          margin-bottom: 18px;
+
+        .pill.up {
+          color: var(--up);
+          border-color: rgba(198, 90, 46, 0.25);
+          background: rgba(198, 90, 46, 0.08);
         }
-        .panel {
-          padding: 14px 16px 12px;
+
+        .pill.down {
+          color: var(--down);
+          border-color: rgba(31, 111, 95, 0.25);
+          background: rgba(31, 111, 95, 0.08);
         }
-        .panel h2 {
-          margin: 2px 0 8px;
-          font-size: 19px;
+
+        .pill.neutral {
+          color: var(--neutral);
+          border-color: rgba(88, 96, 107, 0.25);
+          background: rgba(88, 96, 107, 0.06);
         }
-        .signal-grid {
-          display: grid;
-          grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
-          gap: 16px;
-          margin-bottom: 18px;
+
+        .news-card h3,
+        .highlight-card h3 {
+          margin: 0 0 8px;
+          font-size: 1.02rem;
+          line-height: 1.4;
         }
-        .signal-hero {
-          display: grid;
-          grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
-          gap: 16px;
-          align-items: stretch;
+
+        .small {
+          color: var(--muted);
+          font-size: 0.84rem;
         }
-        .signal-box {
+
+        .table-wrap {
+          overflow-x: auto;
+          border-radius: 16px;
           border: 1px solid var(--line);
-          border-radius: 18px;
-          background: rgba(255,255,255,0.72);
-          padding: 14px 16px;
         }
-        .signal-box h3 {
-          margin: 0 0 10px;
-          font-size: 16px;
-        }
-        .signal-number {
-          font-size: 34px;
-          font-weight: 700;
-          margin: 4px 0;
-        }
-        .signal-copy {
-          color: #54605c;
-          font-size: 14px;
-          line-height: 1.7;
-        }
-        .mini-metrics {
-          display: grid;
-          grid-template-columns: repeat(2, minmax(0, 1fr));
-          gap: 12px;
-          margin-top: 12px;
-        }
-        .mini-metric {
-          border: 1px solid #e6ddd0;
-          border-radius: 14px;
-          padding: 10px 12px;
-          background: rgba(255,255,255,0.74);
-        }
-        .mini-label {
-          font-size: 12px;
-          color: #65706c;
-          margin-bottom: 4px;
-        }
-        .mini-value {
-          font-size: 19px;
-          font-weight: 700;
-        }
-        .panel p {
-          margin: 0 0 10px;
-          color: #5e6763;
-          font-size: 13px;
-          line-height: 1.5;
-        }
-        .plot {
-          min-height: 310px;
-        }
-        .news-table {
+
+        table {
           width: 100%;
           border-collapse: collapse;
-          font-size: 14px;
+          background: rgba(255, 255, 255, 0.76);
         }
-        .news-table th, .news-table td {
-          padding: 10px 8px;
-          border-bottom: 1px solid #ece6db;
+
+        th,
+        td {
+          padding: 10px 12px;
+          border-bottom: 1px solid rgba(216, 207, 192, 0.65);
           text-align: left;
+          font-size: 0.92rem;
           vertical-align: top;
         }
-        .news-table th {
-          color: #5a625d;
-          font-weight: 600;
+
+        th {
+          font-size: 0.82rem;
+          text-transform: uppercase;
+          letter-spacing: 0.04em;
+          color: var(--muted);
+          background: rgba(249, 245, 238, 0.95);
         }
-        .news-table a {
-          color: var(--down);
-          text-decoration: none;
+
+        tbody tr:last-child td {
+          border-bottom: none;
         }
-        .empty {
-          color: #6a7470;
-          font-size: 14px;
-          padding: 18px 4px;
+
+        .footer {
+          margin-top: 18px;
+          color: var(--muted);
+          font-size: 0.84rem;
         }
-        .event-list {
-          list-style: none;
-          padding: 0;
-          margin: 0;
+
+        .empty-state {
+          color: var(--muted);
+          font-size: 0.9rem;
+          padding: 14px 0;
         }
-        .event-list li {
-          padding: 10px 0;
-          border-bottom: 1px solid #ece6db;
-        }
-        .event-list a {
-          color: var(--down);
-          text-decoration: none;
-        }
-        .score {
-          color: #5a625d;
-          font-size: 13px;
-          margin-left: 8px;
-        }
-        .footnote {
-          color: #616a66;
-          font-size: 13px;
-          line-height: 1.6;
-          margin-top: 12px;
-        }
-        @media (max-width: 960px) {
-          .cards, .grid-2, .signal-grid, .signal-hero, .mini-metrics {
+
+        @media (max-width: 1080px) {
+          .hero-grid,
+          .grid-4,
+          .grid-3,
+          .grid-2 {
             grid-template-columns: 1fr;
           }
-          .hero h1 {
-            font-size: 28px;
+
+          .topbar {
+            flex-direction: column;
+          }
+
+          .topnav {
+            justify-content: flex-start;
           }
         }
-      </style>
-      <script>__PLOTLY_JS__</script>
-    </head>
-    <body>
-      <script id="payload-data" type="application/json">__PAYLOAD_JSON__</script>
-      <div class="page">
-        <section class="hero">
-          <div class="kicker">EASPRING 300073 PUBLIC DASHBOARD</div>
-          <h1>当升科技每日跟踪看板</h1>
-          <div class="subtitle">
-            这是免费公网版，不需要你本地开着。当前页面由 GitHub Actions 自动生成并发布，
-            工作日每天 09:15 中国时间更新一次。和本地版不同，这里是纯前端静态页，但我保留了时间窗口切换和新闻筛选。
-          </div>
-          <div class="pill-row">
-            <div class="pill">最新生成时间：__GENERATED_AT__</div>
-            <div class="pill">最近交易日：__LATEST_DATE__</div>
-            <div class="pill">模型标签：__FORECAST_LABEL__</div>
-            <div class="pill">当前站点地址：github.io</div>
-          </div>
-        </section>
+        """
+    )
 
-        <section id="status-banner" class="status-banner"></section>
 
-        <section class="cards">__CARDS__</section>
-
-        <section class="signal-grid">
-          <div class="panel">
-            <h2>当日信号</h2>
-            <p>这是最重要的一块。它告诉你模型对下一交易日的方向判断、收益倾向，以及这套判断到底靠不靠谱。</p>
-            <div class="signal-hero">
-              <div id="signal-gauge" class="plot" style="min-height:280px;"></div>
-              <div class="signal-box">
-                <h3 id="signal-headline">信号摘要</h3>
-                <div id="signal-main-number" class="signal-number">--</div>
-                <div id="signal-copy" class="signal-copy"></div>
-                <div class="mini-metrics">
-                  <div class="mini-metric">
-                    <div class="mini-label">预测收益率</div>
-                    <div id="signal-return" class="mini-value">--</div>
-                  </div>
-                  <div class="mini-metric">
-                    <div class="mini-label">20日涨跌</div>
-                    <div id="signal-20d" class="mini-value">--</div>
-                  </div>
-                  <div class="mini-metric">
-                    <div class="mini-label">分类准确率</div>
-                    <div id="signal-accuracy" class="mini-value">--</div>
-                  </div>
-                  <div class="mini-metric">
-                    <div class="mini-label">多数基线</div>
-                    <div id="signal-baseline" class="mini-value">--</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-          <div class="panel">
-            <h2>更新监控</h2>
-            <p>用来判断这个站点是不是还在正常更新，避免你几周之后才发现它静默停了。</p>
-            <div class="signal-box">
-              <h3>站点健康状态</h3>
-              <div id="monitor-headline" class="signal-number">--</div>
-              <div id="monitor-copy" class="signal-copy"></div>
-              <div class="mini-metrics">
-                <div class="mini-metric">
-                  <div class="mini-label">最新生成时间</div>
-                  <div id="monitor-generated" class="mini-value" style="font-size:16px;">--</div>
-                </div>
-                <div class="mini-metric">
-                  <div class="mini-label">最近交易日</div>
-                  <div id="monitor-trade-date" class="mini-value" style="font-size:16px;">--</div>
-                </div>
-                <div class="mini-metric">
-                  <div class="mini-label">最近 7 天消息</div>
-                  <div id="monitor-news" class="mini-value">--</div>
-                </div>
-                <div class="mini-metric">
-                  <div class="mini-label">PDF 覆盖</div>
-                  <div id="monitor-pdf" class="mini-value">--</div>
-                </div>
-              </div>
-              <div class="footnote" style="margin-top:14px;">
-                如果这里显示“更新滞后”，优先检查仓库的 Actions 页面是否有失败记录。
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section class="panel" style="margin-bottom:18px;">
-          <h2>时间窗口</h2>
-          <p>这里的切换不需要后端，浏览器本地就能重新画图。</p>
-          <div class="toolbar">
-            <div class="segment" id="range-buttons">
-              <button data-days="90">3个月</button>
-              <button data-days="180">6个月</button>
-              <button data-days="365" class="active">1年</button>
-              <button data-days="730">2年</button>
-            </div>
-          </div>
-        </section>
-
-        <section class="grid-2">
-          <div class="panel">
-            <h2>股价走势</h2>
-            <p>收盘价与 20 日均线。</p>
-            <div id="price-chart" class="plot"></div>
-          </div>
-          <div class="panel">
-            <h2>相对创业板</h2>
-            <p>把两者归一到 100，更容易看相对强弱。</p>
-            <div id="relative-chart" class="plot"></div>
-          </div>
-        </section>
-
-        <section class="grid-2">
-          <div class="panel">
-            <h2>成交量</h2>
-            <p>红色表示当日涨跌幅非负，绿色表示当日下跌。</p>
-            <div id="volume-chart" class="plot"></div>
-          </div>
-          <div class="panel">
-            <h2>月度信息流</h2>
-            <p>消息数和平均情绪一起看。</p>
-            <div id="news-chart" class="plot"></div>
-          </div>
-        </section>
-
-        <section class="grid-2">
-          <div class="panel">
-            <h2>季度收入与净利润</h2>
-            <p>用来判断基本面是否在修复。</p>
-            <div id="fundamental-chart" class="plot"></div>
-          </div>
-          <div class="panel">
-            <h2>毛利率 / 净利率 / ROE</h2>
-            <p>更偏经营质量视角。</p>
-            <div id="margin-chart" class="plot"></div>
-          </div>
-        </section>
-
-        <section class="grid-2">
-          <div class="panel">
-            <h2>模型对比</h2>
-            <p>看当前选中的分类模型是不是明显优于其它候选模型。</p>
-            <div id="model-compare-chart" class="plot"></div>
-          </div>
-          <div class="panel">
-            <h2>模型最看重的特征</h2>
-            <p>这不是当日逐笔归因，但能告诉你模型大体更重视什么。</p>
-            <div id="feature-chart" class="plot"></div>
-          </div>
-        </section>
-
-        <section class="panel" style="margin-bottom:18px;">
-          <h2>新闻筛选</h2>
-          <p>这里可以像本地版那样切月份和筛来源，只是数据更新频率是每天一次，不是实时。</p>
-          <div class="toolbar">
-            <select id="news-month" class="select"></select>
-            <select id="news-source" class="select"></select>
-            <select id="news-impact" class="select">
-              <option value="全部">方向：全部</option>
-              <option value="偏利多">方向：偏利多</option>
-              <option value="中性">方向：中性</option>
-              <option value="偏利空">方向：偏利空</option>
-            </select>
-          </div>
-          <div id="news-summary" class="footnote"></div>
-          <table class="news-table">
-            <thead>
-              <tr>
-                <th>时间</th>
-                <th>来源</th>
-                <th>方向</th>
-                <th>标题</th>
-                <th>情绪</th>
-              </tr>
-            </thead>
-            <tbody id="news-body"></tbody>
-          </table>
-        </section>
-
-        <section class="grid-2">
-          <div class="panel">
-            <h2>最强利多事件</h2>
-            <p>按情绪分数从高到低排序。</p>
-            <ul id="positive-list" class="event-list"></ul>
-          </div>
-          <div class="panel">
-            <h2>最强利空事件</h2>
-            <p>按情绪分数从低到高排序。</p>
-            <ul id="negative-list" class="event-list"></ul>
-          </div>
-        </section>
-      </div>
-
-      <script>
-        const payload = JSON.parse(document.getElementById("payload-data").textContent);
-        const state = {
-          lookbackDays: 365,
-          newsMonth: "全部",
-          newsSource: "全部",
-          newsImpact: "全部",
+def build_javascript() -> str:
+    return dedent(
+        """\
+        const IMPACT_CLASS = {
+          "偏利多": "up",
+          "偏利空": "down",
+          "中性": "neutral",
         };
 
-        const colorUp = "__COLOR_UP__";
-        const colorDown = "__COLOR_DOWN__";
+        const WINDOW_OPTIONS = {
+          "3M": 63,
+          "6M": 126,
+          "1Y": 252,
+          "2Y": 504,
+        };
 
-        function latestDate(records, field = "date") {
-          return records[records.length - 1][field];
-        }
-
-        function filterByDays(records, field, days) {
-          if (days >= 730) {
-            return records.slice();
+        async function loadDashboardData() {
+          const response = await fetch("data/dashboard.json", { cache: "no-store" });
+          if (!response.ok) {
+            throw new Error("Failed to load dashboard data");
           }
-          const maxDate = new Date(latestDate(records, field));
-          const start = new Date(maxDate);
-          start.setDate(start.getDate() - (days - 1));
-          return records.filter((row) => new Date(row[field]) >= start);
+          return response.json();
         }
 
-        function activeRangeButtons() {
-          document.querySelectorAll("#range-buttons button").forEach((button) => {
-            button.classList.toggle("active", Number(button.dataset.days) === state.lookbackDays);
-          });
+        function formatPercent(value, digits = 2) {
+          if (value === null || value === undefined || Number.isNaN(Number(value))) {
+            return "N/A";
+          }
+          return `${(Number(value) * 100).toFixed(digits)}%`;
         }
 
-        function renderPriceCharts() {
-          const prices = filterByDays(payload.prices, "date", state.lookbackDays);
-          const dates = prices.map((row) => row.date);
-          const close = prices.map((row) => row.close);
-          const ma20 = prices.map((_, index) => {
-            const subset = close.slice(Math.max(0, index - 19), index + 1);
-            return subset.reduce((sum, value) => sum + value, 0) / subset.length;
-          });
-          const volume = prices.map((row) => row.volume);
-          const pct = prices.map((row) => row.pct_change ?? 0);
-          const volumeColors = pct.map((value) => (value >= 0 ? colorUp : colorDown));
+        function formatNumber(value, digits = 2) {
+          if (value === null || value === undefined || Number.isNaN(Number(value))) {
+            return "N/A";
+          }
+          return Number(value).toFixed(digits);
+        }
 
-          Plotly.react(
-            "price-chart",
-            [
-              {x: dates, y: close, type: "scatter", mode: "lines", name: "收盘价", line: {color: colorUp, width: 2.7}},
-              {x: dates, y: ma20, type: "scatter", mode: "lines", name: "20日均线", line: {color: colorDown, width: 2, dash: "dot"}},
-            ],
-            {
-              height: 320,
-              margin: {l: 36, r: 18, t: 10, b: 30},
-              paper_bgcolor: "rgba(0,0,0,0)",
-              plot_bgcolor: "rgba(255,255,255,0.72)",
-              legend: {orientation: "h", y: 1.1, x: 0},
-              xaxis: {showgrid: false},
-              yaxis: {gridcolor: "rgba(120,120,120,0.15)"},
-            },
-            {responsive: true, displayModeBar: false}
+        function toneClass(value, reverse = false) {
+          if (value === null || value === undefined || Number.isNaN(Number(value))) {
+            return "neutral";
+          }
+          const num = Number(value);
+          if (!reverse && num > 0) return "up";
+          if (!reverse && num < 0) return "down";
+          if (reverse && num < 0) return "up";
+          if (reverse && num > 0) return "down";
+          return "neutral";
+        }
+
+        function escapeHtml(value) {
+          return String(value ?? "")
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#39;");
+        }
+
+        function renderMetricCard(targetId, label, value, detail, tone = "neutral") {
+          const target = document.getElementById(targetId);
+          if (!target) return;
+          target.className = `panel metric-card ${tone}`;
+          target.innerHTML = `
+            <div class="metric-label">${escapeHtml(label)}</div>
+            <div class="metric-value">${escapeHtml(value)}</div>
+            <div class="metric-detail">${escapeHtml(detail)}</div>
+          `;
+        }
+
+        function populateSummary(data) {
+          const summary = data.summary;
+          const signal = data.signal;
+          const signalProbability = signal.up_probability ?? summary.classification_accuracy;
+          renderMetricCard(
+            "metric-close",
+            "最新收盘价",
+            signal.latest_close ? `${formatNumber(signal.latest_close, 2)}` : "N/A",
+            `${signal.signal_date || summary.latest_date} 收盘`,
+            "neutral"
+          );
+          renderMetricCard(
+            "metric-20d",
+            "20日涨跌",
+            formatPercent(summary.change_20d),
+            "近一个月交易窗口",
+            toneClass(summary.change_20d)
+          );
+          renderMetricCard(
+            "metric-relative",
+            "相对创业板",
+            formatPercent(summary.relative_return),
+            "相对基准累计收益",
+            toneClass(summary.relative_return)
+          );
+          renderMetricCard(
+            "metric-drawdown",
+            "最大回撤",
+            formatPercent(summary.max_drawdown),
+            "两年区间最大回撤",
+            toneClass(summary.max_drawdown, true)
+          );
+          renderMetricCard(
+            "metric-model",
+            "方向模型准确率",
+            formatPercent(summary.classification_accuracy),
+            `基线 ${formatPercent(summary.classification_baseline)}`,
+            toneClass((summary.classification_accuracy ?? 0) - (summary.classification_baseline ?? 0))
+          );
+          renderMetricCard(
+            "metric-news",
+            "新闻样本量",
+            `${summary.news_total ?? 0}`,
+            `${summary.news_days ?? 0} 个有效消息日`,
+            "neutral"
           );
 
-          Plotly.react(
-            "volume-chart",
-            [
-              {x: dates, y: volume, type: "bar", name: "成交量", marker: {color: volumeColors, opacity: 0.82}},
-            ],
-            {
-              height: 320,
-              margin: {l: 36, r: 18, t: 10, b: 30},
-              paper_bgcolor: "rgba(0,0,0,0)",
-              plot_bgcolor: "rgba(255,255,255,0.72)",
-              xaxis: {showgrid: false},
-              yaxis: {gridcolor: "rgba(120,120,120,0.15)"},
-            },
-            {responsive: true, displayModeBar: false}
-          );
+          const signalPanel = document.getElementById("signal-panel");
+          if (signalPanel) {
+            const tone = toneClass(signal.predicted_return ?? 0);
+            signalPanel.innerHTML = `
+              <div class="label">当日信号</div>
+              <div class="value">${formatPercent(signalProbability, 1)}</div>
+              <div class="detail">下一交易日上涨概率</div>
+              <div class="pill-row" style="margin-top: 12px;">
+                <span class="pill ${tone}">${escapeHtml(signal.label || "中性")}</span>
+                <span class="pill neutral">预测收益 ${formatPercent(signal.predicted_return, 2)}</span>
+                <span class="pill neutral">下一交易日 ${escapeHtml(signal.next_session_date || "N/A")}</span>
+              </div>
+            `;
+          }
+
+          const headline = document.getElementById("hero-headline");
+          const subline = document.getElementById("hero-subline");
+          if (headline) {
+            headline.textContent = signal.label || "震荡偏中性";
+          }
+          if (subline) {
+            subline.textContent = `${signal.signal_date || summary.latest_date} 的收盘信号，供跟踪参考，不构成投资建议。`;
+          }
         }
 
-        function renderRelativeChart() {
-          const priceWindow = filterByDays(payload.prices, "date", state.lookbackDays);
-          const benchmarkMap = new Map(payload.benchmark.map((row) => [row.date, row.benchmark_close]));
-          const merged = priceWindow
-            .map((row) => ({
-              date: row.date,
-              close: row.close,
-              benchmark_close: benchmarkMap.get(row.date),
-            }))
-            .filter((row) => row.benchmark_close != null);
-          const firstClose = merged[0].close;
-          const firstBenchmark = merged[0].benchmark_close;
+        function renderStatusBanner(data) {
+          const banner = document.getElementById("status-banner");
+          if (!banner) return;
+          const latestDate = new Date(`${data.summary.latest_date}T00:00:00`);
+          const now = new Date();
+          const diffDays = Math.floor((now - latestDate) / (1000 * 60 * 60 * 24));
+          const label = document.getElementById("generated-at");
+          if (label) {
+            label.textContent = `最后生成时间：${data.generated_at_label}`;
+          }
+          if (diffDays > 2) {
+            banner.className = "banner warning show";
+            banner.innerHTML = `数据可能已经过期。最新交易日是 ${escapeHtml(data.summary.latest_date)}，距今天约 ${diffDays} 天。`;
+          } else {
+            banner.className = "banner show";
+            banner.innerHTML = `数据状态正常。最新交易日 ${escapeHtml(data.summary.latest_date)}，页面生成于 ${escapeHtml(data.generated_at_label)}。`;
+          }
+        }
 
-          Plotly.react(
-            "relative-chart",
+        function buildPriceChart(data, windowKey = "1Y") {
+          const chart = document.getElementById("price-chart");
+          if (!chart) return;
+          const count = WINDOW_OPTIONS[windowKey] || WINDOW_OPTIONS["1Y"];
+          const rows = data.prices.slice(-count);
+          Plotly.newPlot(
+            chart,
             [
               {
-                x: merged.map((row) => row.date),
-                y: merged.map((row) => row.close / firstClose * 100),
+                x: rows.map((row) => row.date),
+                y: rows.map((row) => row.close),
                 type: "scatter",
                 mode: "lines",
                 name: "当升科技",
-                line: {color: colorUp, width: 2.7},
+                line: { color: "#c65a2e", width: 3 },
+                yaxis: "y",
               },
               {
-                x: merged.map((row) => row.date),
-                y: merged.map((row) => row.benchmark_close / firstBenchmark * 100),
-                type: "scatter",
-                mode: "lines",
-                name: "创业板指",
-                line: {color: colorDown, width: 2.4},
+                x: rows.map((row) => row.date),
+                y: rows.map((row) => row.volume),
+                type: "bar",
+                name: "成交量",
+                marker: { color: "rgba(31, 111, 95, 0.22)" },
+                yaxis: "y2",
               },
             ],
             {
-              height: 320,
-              margin: {l: 42, r: 18, t: 10, b: 30},
               paper_bgcolor: "rgba(0,0,0,0)",
-              plot_bgcolor: "rgba(255,255,255,0.72)",
-              legend: {orientation: "h", y: 1.1, x: 0},
-              xaxis: {showgrid: false},
-              yaxis: {title: "起点=100", gridcolor: "rgba(120,120,120,0.15)"},
+              plot_bgcolor: "rgba(0,0,0,0)",
+              margin: { l: 42, r: 42, t: 16, b: 40 },
+              xaxis: { showgrid: false },
+              yaxis: { title: "收盘价", gridcolor: "rgba(216, 207, 192, 0.35)" },
+              yaxis2: { title: "成交量", overlaying: "y", side: "right", showgrid: false },
+              legend: { orientation: "h", y: 1.1 },
             },
-            {responsive: true, displayModeBar: false}
-          );
-        }
-
-        function monthKey(dateString) {
-          return dateString.slice(0, 7);
-        }
-
-        function renderNewsMonthlyChart() {
-          const monthly = {};
-          payload.news.forEach((row) => {
-            const key = monthKey(row.effective_date);
-            if (!monthly[key]) {
-              monthly[key] = {count: 0, sentimentSum: 0};
-            }
-            monthly[key].count += 1;
-            monthly[key].sentimentSum += Number(row.sentiment_score || 0);
-          });
-          const months = Object.keys(monthly).sort();
-          const counts = months.map((key) => monthly[key].count);
-          const sentiment = months.map((key) => monthly[key].sentimentSum / monthly[key].count);
-
-          Plotly.react(
-            "news-chart",
-            [
-              {x: months, y: counts, type: "bar", name: "消息数", marker: {color: "rgba(31,111,95,0.82)"}, yaxis: "y"},
-              {x: months, y: sentiment, type: "scatter", mode: "lines+markers", name: "平均情绪", line: {color: colorUp, width: 2.4}, yaxis: "y2"},
-            ],
-            {
-              height: 320,
-              margin: {l: 36, r: 36, t: 10, b: 30},
-              paper_bgcolor: "rgba(0,0,0,0)",
-              plot_bgcolor: "rgba(255,255,255,0.72)",
-              legend: {orientation: "h", y: 1.1, x: 0},
-              xaxis: {showgrid: false},
-              yaxis: {title: "消息数", gridcolor: "rgba(120,120,120,0.15)"},
-              yaxis2: {title: "平均情绪", overlaying: "y", side: "right", gridcolor: "rgba(120,120,120,0.15)"},
-            },
-            {responsive: true, displayModeBar: false}
-          );
-        }
-
-        function renderFundamentalCharts() {
-          const quarterly = payload.quarterly;
-          const dates = quarterly.map((row) => row["报告日"]);
-
-          Plotly.react(
-            "fundamental-chart",
-            [
-              {x: dates, y: quarterly.map((row) => row.fin_revenue), type: "bar", name: "收入(十亿元)", marker: {color: "rgba(31,111,95,0.82)"}, yaxis: "y"},
-              {x: dates, y: quarterly.map((row) => row.fin_net_profit), type: "scatter", mode: "lines+markers", name: "净利润(十亿元)", line: {color: colorUp, width: 2.4}, yaxis: "y2"},
-            ],
-            {
-              height: 320,
-              margin: {l: 36, r: 36, t: 10, b: 30},
-              paper_bgcolor: "rgba(0,0,0,0)",
-              plot_bgcolor: "rgba(255,255,255,0.72)",
-              legend: {orientation: "h", y: 1.1, x: 0},
-              xaxis: {showgrid: false},
-              yaxis: {title: "收入", gridcolor: "rgba(120,120,120,0.15)"},
-              yaxis2: {title: "净利润", overlaying: "y", side: "right", gridcolor: "rgba(120,120,120,0.15)"},
-            },
-            {responsive: true, displayModeBar: false}
+            { responsive: true, displayModeBar: false }
           );
 
-          Plotly.react(
-            "margin-chart",
-            [
-              {x: dates, y: quarterly.map((row) => row.fin_gross_margin), type: "scatter", mode: "lines+markers", name: "毛利率", line: {color: colorUp, width: 2.4}},
-              {x: dates, y: quarterly.map((row) => row.fin_net_margin), type: "scatter", mode: "lines+markers", name: "净利率", line: {color: colorDown, width: 2.4}},
-              {x: dates, y: quarterly.map((row) => row.fin_roe), type: "scatter", mode: "lines+markers", name: "ROE", line: {color: "#8b6f47", width: 2.2, dash: "dot"}},
-            ],
-            {
-              height: 320,
-              margin: {l: 36, r: 18, t: 10, b: 30},
-              paper_bgcolor: "rgba(0,0,0,0)",
-              plot_bgcolor: "rgba(255,255,255,0.72)",
-              legend: {orientation: "h", y: 1.1, x: 0},
-              xaxis: {showgrid: false},
-              yaxis: {title: "百分比", gridcolor: "rgba(120,120,120,0.15)"},
-            },
-            {responsive: true, displayModeBar: false}
-          );
-        }
-
-        function renderSignalPanel() {
-          const forecast = payload.metrics.forecast;
-          const descriptive = payload.metrics.descriptive_summary;
-          const cls = payload.metrics.classification;
-          const upProbability = Number(forecast.next_up_probability || 0) * 100;
-          const predictedReturn = Number(forecast.predicted_return || 0);
-          const accuracy = Number(cls.selected_metrics.accuracy || 0);
-          const baseline = Number(cls.baseline_accuracy || 0);
-
-          Plotly.react(
-            "signal-gauge",
-            [
-              {
-                type: "indicator",
-                mode: "gauge+number",
-                value: upProbability,
-                number: {suffix: "%", font: {size: 34}},
-                title: {text: "下一交易日上涨概率"},
-                gauge: {
-                  axis: {range: [0, 100]},
-                  bar: {color: colorUp},
-                  steps: [
-                    {range: [0, 40], color: "rgba(31,111,95,0.18)"},
-                    {range: [40, 60], color: "rgba(88,96,107,0.15)"},
-                    {range: [60, 100], color: "rgba(198,90,46,0.18)"},
-                  ],
-                  threshold: {line: {color: "#1d2320", width: 4}, value: 50},
+          const performanceChart = document.getElementById("performance-chart");
+          if (performanceChart) {
+            Plotly.newPlot(
+              performanceChart,
+              [
+                {
+                  x: rows.map((row) => row.date),
+                  y: rows.map((row) => row.stock_index),
+                  type: "scatter",
+                  mode: "lines",
+                  name: "当升科技",
+                  line: { color: "#c65a2e", width: 3 },
                 },
-              },
-            ],
-            {
-              height: 280,
-              margin: {l: 8, r: 8, t: 14, b: 8},
-              paper_bgcolor: "rgba(255,255,255,0.72)",
-            },
-            {responsive: true, displayModeBar: false}
-          );
-
-          document.getElementById("signal-headline").textContent = `模型标签：${forecast.label}`;
-          document.getElementById("signal-main-number").textContent = `${upProbability.toFixed(1)}%`;
-          document.getElementById("signal-copy").textContent =
-            `对 ${forecast.next_session_date} 的判断是“${forecast.label}”。如果你只看一个数字，就看上涨概率和预测收益率；如果这两个都接近中轴，就说明它不是高确信度信号。`;
-          document.getElementById("signal-return").textContent = `${(predictedReturn * 100).toFixed(2)}%`;
-          document.getElementById("signal-20d").textContent = `${(Number(descriptive.latest_20d_return || 0) * 100).toFixed(2)}%`;
-          document.getElementById("signal-accuracy").textContent = `${(accuracy * 100).toFixed(1)}%`;
-          document.getElementById("signal-baseline").textContent = `${(baseline * 100).toFixed(1)}%`;
-        }
-
-        function renderStatusBanner() {
-          const generatedAt = new Date(payload.metrics.config.generated_at);
-          const now = new Date();
-          const ageHours = (now - generatedAt) / 36e5;
-          const banner = document.getElementById("status-banner");
-          const actionsUrl = "https://github.com/Shuyu-G/easpring-300073-dashboard/actions";
-          const stale = ageHours > 54;
-          banner.className = `status-banner ${stale ? "warn" : "ok"}`;
-          banner.innerHTML = stale
-            ? `更新提醒：这份页面距离上次成功生成已经超过 <strong>${Math.round(ageHours)}</strong> 小时，可能自动更新停了。请检查 <a href="${actionsUrl}" target="_blank" rel="noreferrer">GitHub Actions</a>。`
-            : `更新状态正常：页面最近一次成功生成于 <strong>${generatedAt.toLocaleString("zh-CN")}</strong>，目前看起来还在按计划工作。`;
-
-          document.getElementById("monitor-headline").textContent = stale ? "更新滞后" : "更新正常";
-          document.getElementById("monitor-copy").textContent = stale
-            ? "这通常意味着最近的定时任务失败了，或者没有按预期执行。"
-            : "最近的自动更新仍在工作，当前页面不是本地缓存旧页面。";
-          document.getElementById("monitor-generated").textContent = generatedAt.toLocaleString("zh-CN");
-          document.getElementById("monitor-trade-date").textContent = payload.prices[payload.prices.length - 1].date;
-          document.getElementById("monitor-news").textContent = String(
-            payload.news.filter((row) => {
-              const diff = (new Date(payload.prices[payload.prices.length - 1].date) - new Date(row.effective_date)) / 86400000;
-              return diff <= 7;
-            }).length
-          );
-          document.getElementById("monitor-pdf").textContent = String(payload.metrics.data_summary.pdf_extract_ok || 0);
-        }
-
-        function renderModelCharts() {
-          const candidates = payload.metrics.classification.candidates || [];
-          Plotly.react(
-            "model-compare-chart",
-            [
-              {
-                x: candidates.map((row) => row.name),
-                y: candidates.map((row) => Number(row.accuracy || 0)),
-                type: "bar",
-                name: "准确率",
-                marker: {color: "rgba(31,111,95,0.82)"},
-              },
-              {
-                x: candidates.map((row) => row.name),
-                y: candidates.map((row) => Number(row.balanced_accuracy || 0)),
-                type: "bar",
-                name: "平衡准确率",
-                marker: {color: "rgba(198,90,46,0.82)"},
-              },
-              {
-                x: candidates.map((row) => row.name),
-                y: candidates.map((row) => Number(row.roc_auc || 0)),
-                type: "bar",
-                name: "ROC AUC",
-                marker: {color: "rgba(139,111,71,0.82)"},
-              },
-            ],
-            {
-              barmode: "group",
-              height: 320,
-              margin: {l: 36, r: 18, t: 10, b: 30},
-              paper_bgcolor: "rgba(0,0,0,0)",
-              plot_bgcolor: "rgba(255,255,255,0.72)",
-              legend: {orientation: "h", y: 1.1, x: 0},
-              yaxis: {gridcolor: "rgba(120,120,120,0.15)"},
-              xaxis: {showgrid: false},
-            },
-            {responsive: true, displayModeBar: false}
-          );
-
-          const importance = (payload.metrics.classification.feature_importance || [])
-            .slice()
-            .sort((a, b) => Number(a.importance || 0) - Number(b.importance || 0));
-          Plotly.react(
-            "feature-chart",
-            [
-              {
-                x: importance.map((row) => Number(row.importance || 0)),
-                y: importance.map((row) => row.feature),
-                type: "bar",
-                orientation: "h",
-                marker: {
-                  color: importance.map((row) => Number(row.importance || 0) >= 0 ? colorUp : colorDown),
+                {
+                  x: rows.map((row) => row.date),
+                  y: rows.map((row) => row.benchmark_index),
+                  type: "scatter",
+                  mode: "lines",
+                  name: "创业板指",
+                  line: { color: "#1f6f5f", width: 2.6 },
                 },
+              ],
+              {
+                paper_bgcolor: "rgba(0,0,0,0)",
+                plot_bgcolor: "rgba(0,0,0,0)",
+                margin: { l: 42, r: 18, t: 16, b: 40 },
+                xaxis: { showgrid: false },
+                yaxis: { title: "归一化指数", gridcolor: "rgba(216, 207, 192, 0.35)" },
+                legend: { orientation: "h", y: 1.12 },
               },
-            ],
-            {
-              height: 320,
-              margin: {l: 96, r: 18, t: 10, b: 30},
-              paper_bgcolor: "rgba(0,0,0,0)",
-              plot_bgcolor: "rgba(255,255,255,0.72)",
-              xaxis: {gridcolor: "rgba(120,120,120,0.15)"},
-              yaxis: {showgrid: false},
-            },
-            {responsive: true, displayModeBar: false}
-          );
-        }
-
-        function populateNewsFilters() {
-          const monthSelect = document.getElementById("news-month");
-          const sourceSelect = document.getElementById("news-source");
-
-          const months = ["全部", ...Array.from(new Set(payload.news.map((row) => monthKey(row.effective_date)))).sort().reverse()];
-          monthSelect.innerHTML = months.map((value) => `<option value="${value}">月份：${value}</option>`).join("");
-          monthSelect.value = "全部";
-
-          const sources = ["全部", ...Array.from(new Set(payload.news.map((row) => row.source_label)))];
-          sourceSelect.innerHTML = sources.map((value) => `<option value="${value}">来源：${value}</option>`).join("");
-          sourceSelect.value = "全部";
-        }
-
-        function filteredNews() {
-          return payload.news.filter((row) => {
-            const matchMonth = state.newsMonth === "全部" || monthKey(row.effective_date) === state.newsMonth;
-            const matchSource = state.newsSource === "全部" || row.source_label === state.newsSource;
-            const matchImpact = state.newsImpact === "全部" || row.impact === state.newsImpact;
-            return matchMonth && matchSource && matchImpact;
-          });
-        }
-
-        function renderNewsTable() {
-          const rows = filteredNews();
-          const body = document.getElementById("news-body");
-          const summary = document.getElementById("news-summary");
-
-          if (!rows.length) {
-            body.innerHTML = `<tr><td colspan="5" class="empty">当前筛选条件下没有匹配的消息。</td></tr>`;
-            summary.textContent = "共 0 条。";
-            return;
+              { responsive: true, displayModeBar: false }
+            );
           }
-
-          summary.textContent = `当前筛选结果 ${rows.length} 条，平均情绪 ${(
-            rows.reduce((sum, row) => sum + Number(row.sentiment_score || 0), 0) / rows.length
-          ).toFixed(3)}。`;
-
-          body.innerHTML = rows.slice(0, 60).map((row) => `
-            <tr>
-              <td>${row.timestamp}</td>
-              <td>${row.source_label}</td>
-              <td>${row.impact}</td>
-              <td><a href="${row.source_link}" target="_blank" rel="noreferrer">${row.title}</a><div style="color:#66706c;font-size:12px;margin-top:4px;">${row.body || ""}</div></td>
-              <td>${Number(row.sentiment_score || 0).toFixed(3)}</td>
-            </tr>
-          `).join("");
         }
 
-        function renderPositiveNegative() {
-          const positive = payload.news.slice().sort((a, b) => Number(b.sentiment_score || 0) - Number(a.sentiment_score || 0)).slice(0, 8);
-          const negative = payload.news.slice().sort((a, b) => Number(a.sentiment_score || 0) - Number(b.sentiment_score || 0)).slice(0, 8);
-          document.getElementById("positive-list").innerHTML = positive.map((row) => `
-            <li><a href="${row.source_link}" target="_blank" rel="noreferrer">${row.timestamp.slice(0, 10)} ${row.title}</a><span class="score">${Number(row.sentiment_score || 0).toFixed(3)}</span></li>
-          `).join("");
-          document.getElementById("negative-list").innerHTML = negative.map((row) => `
-            <li><a href="${row.source_link}" target="_blank" rel="noreferrer">${row.timestamp.slice(0, 10)} ${row.title}</a><span class="score">${Number(row.sentiment_score || 0).toFixed(3)}</span></li>
-          `).join("");
-        }
-
-        function bindControls() {
-          document.querySelectorAll("#range-buttons button").forEach((button) => {
+        function setupWindowButtons(data) {
+          const buttons = Array.from(document.querySelectorAll("[data-window]"));
+          if (!buttons.length) return;
+          let current = "1Y";
+          const rerender = () => {
+            buttons.forEach((button) => {
+              button.classList.toggle("active", button.dataset.window === current);
+            });
+            buildPriceChart(data, current);
+          };
+          buttons.forEach((button) => {
             button.addEventListener("click", () => {
-              state.lookbackDays = Number(button.dataset.days);
-              activeRangeButtons();
-              renderPriceCharts();
-              renderRelativeChart();
+              current = button.dataset.window;
+              rerender();
             });
           });
-
-          document.getElementById("news-month").addEventListener("change", (event) => {
-            state.newsMonth = event.target.value;
-            renderNewsTable();
-          });
-          document.getElementById("news-source").addEventListener("change", (event) => {
-            state.newsSource = event.target.value;
-            renderNewsTable();
-          });
-          document.getElementById("news-impact").addEventListener("change", (event) => {
-            state.newsImpact = event.target.value;
-            renderNewsTable();
-          });
+          rerender();
         }
 
-        function init() {
-          renderStatusBanner();
-          activeRangeButtons();
-          populateNewsFilters();
-          bindControls();
-          renderSignalPanel();
-          renderPriceCharts();
-          renderRelativeChart();
-          renderNewsMonthlyChart();
-          renderFundamentalCharts();
-          renderModelCharts();
-          renderNewsTable();
-          renderPositiveNegative();
+        function renderHighlights(data) {
+          const positive = document.getElementById("positive-highlight");
+          const negative = document.getElementById("negative-highlight");
+          const renderItem = (container, item, fallback) => {
+            if (!container) return;
+            if (!item) {
+              container.innerHTML = `<div class="empty-state">${fallback}</div>`;
+              return;
+            }
+            const tone = IMPACT_CLASS[item.impact] || "neutral";
+            container.innerHTML = `
+              <div class="highlight-card">
+                <div class="pill-row">
+                  <span class="pill ${tone}">${escapeHtml(item.impact)}</span>
+                  <span class="pill neutral">${escapeHtml(item.source_label)}</span>
+                  <span class="pill neutral">${escapeHtml(item.timestamp_label)}</span>
+                </div>
+                <h3><a href="${escapeHtml(item.source_link)}" target="_blank" rel="noreferrer">${escapeHtml(item.title)}</a></h3>
+                <p class="small">情绪分数 ${formatNumber(item.sentiment_score, 3)}</p>
+              </div>
+            `;
+          };
+          renderItem(positive, data.highlights.positive_event?.[0], "没有可展示的正向事件。");
+          renderItem(negative, data.highlights.negative_event?.[0], "没有可展示的负向事件。");
         }
 
-        init();
-      </script>
-    </body>
-    </html>
-    """
+        function buildImpactBars(data) {
+          const chart = document.getElementById("impact-chart");
+          if (!chart) return;
+          Plotly.newPlot(
+            chart,
+            [
+              {
+                x: ["偏利多", "中性", "偏利空"],
+                y: [
+                  data.summary.positive_news_count || 0,
+                  data.summary.neutral_news_count || 0,
+                  data.summary.negative_news_count || 0,
+                ],
+                type: "bar",
+                marker: {
+                  color: ["#c65a2e", "#58606b", "#1f6f5f"],
+                },
+              },
+            ],
+            {
+              paper_bgcolor: "rgba(0,0,0,0)",
+              plot_bgcolor: "rgba(0,0,0,0)",
+              margin: { l: 42, r: 18, t: 12, b: 40 },
+              xaxis: { showgrid: false },
+              yaxis: { gridcolor: "rgba(216, 207, 192, 0.35)" },
+            },
+            { responsive: true, displayModeBar: false }
+          );
+        }
 
-    html = (
-        html.replace("__PLOTLY_JS__", plotly_js)
-        .replace("__PAYLOAD_JSON__", payload_json)
-        .replace("__GENERATED_AT__", generated_at.strftime("%Y-%m-%d %H:%M"))
-        .replace("__LATEST_DATE__", latest_date.strftime("%Y-%m-%d"))
-        .replace("__FORECAST_LABEL__", metrics["forecast"]["label"])
-        .replace("__CARDS__", "".join(cards))
-        .replace("__COLOR_UP__", COLOR_UP)
-        .replace("__COLOR_DOWN__", COLOR_DOWN)
+        function renderNewsFeed(data, options = {}) {
+          const target = document.getElementById(options.targetId || "news-feed");
+          if (!target) return;
+
+          const monthSelect = document.getElementById(options.monthId || "news-month");
+          const sourceSelect = document.getElementById(options.sourceId || "news-source");
+          const impactSelect = document.getElementById(options.impactId || "news-impact");
+
+          const allNews = data.news;
+          if (monthSelect && !monthSelect.dataset.ready) {
+            const months = [...new Set(allNews.map((item) => item.month).filter(Boolean))];
+            monthSelect.innerHTML = `<option value="all">全部月份</option>${months
+              .map((month) => `<option value="${escapeHtml(month)}">${escapeHtml(month)}</option>`)
+              .join("")}`;
+            monthSelect.dataset.ready = "true";
+          }
+          if (sourceSelect && !sourceSelect.dataset.ready) {
+            const sources = [...new Set(allNews.map((item) => item.source_label).filter(Boolean))];
+            sourceSelect.innerHTML = `<option value="all">全部来源</option>${sources
+              .map((source) => `<option value="${escapeHtml(source)}">${escapeHtml(source)}</option>`)
+              .join("")}`;
+            sourceSelect.dataset.ready = "true";
+          }
+          if (impactSelect && !impactSelect.dataset.ready) {
+            impactSelect.innerHTML = `
+              <option value="all">全部方向</option>
+              <option value="偏利多">偏利多</option>
+              <option value="中性">中性</option>
+              <option value="偏利空">偏利空</option>
+            `;
+            impactSelect.dataset.ready = "true";
+          }
+
+          const rerender = () => {
+            const month = monthSelect ? monthSelect.value : "all";
+            const source = sourceSelect ? sourceSelect.value : "all";
+            const impact = impactSelect ? impactSelect.value : "all";
+            const limit = options.limit || allNews.length;
+            const rows = allNews
+              .filter((item) => month === "all" || item.month === month)
+              .filter((item) => source === "all" || item.source_label === source)
+              .filter((item) => impact === "all" || item.impact === impact)
+              .slice(0, limit);
+
+            if (!rows.length) {
+              target.innerHTML = `<div class="empty-state">当前筛选条件下没有新闻。</div>`;
+              return;
+            }
+
+            target.innerHTML = rows
+              .map((item) => {
+                const tone = IMPACT_CLASS[item.impact] || "neutral";
+                const body = item.body_excerpt ? `<p class="small">${escapeHtml(item.body_excerpt)}</p>` : "";
+                return `
+                  <article class="news-card">
+                    <div class="pill-row">
+                      <span class="pill ${tone}">${escapeHtml(item.impact)}</span>
+                      <span class="pill neutral">${escapeHtml(item.source_label)}</span>
+                      <span class="pill neutral">${escapeHtml(item.effective_date)}</span>
+                    </div>
+                    <h3><a href="${escapeHtml(item.source_link)}" target="_blank" rel="noreferrer">${escapeHtml(item.title)}</a></h3>
+                    ${body}
+                    <p class="small">情绪分数 ${formatNumber(item.sentiment_score, 3)} | 发布 ${escapeHtml(item.timestamp)}</p>
+                  </article>
+                `;
+              })
+              .join("");
+          };
+
+          [monthSelect, sourceSelect, impactSelect]
+            .filter(Boolean)
+            .forEach((node) => node.addEventListener("change", rerender));
+          rerender();
+        }
+
+        function buildModelCharts(data) {
+          const compareChart = document.getElementById("model-compare-chart");
+          if (compareChart) {
+            const candidates = data.models.classification.candidates || [];
+            Plotly.newPlot(
+              compareChart,
+              [
+                {
+                  x: candidates.map((item) => item.model_name || item.model || "model"),
+                  y: candidates.map((item) => item.accuracy ?? 0),
+                  type: "bar",
+                  name: "Accuracy",
+                  marker: { color: "#c65a2e" },
+                },
+                {
+                  x: candidates.map((item) => item.model_name || item.model || "model"),
+                  y: candidates.map((item) => item.roc_auc ?? 0),
+                  type: "bar",
+                  name: "ROC AUC",
+                  marker: { color: "#1f6f5f" },
+                },
+              ],
+              {
+                barmode: "group",
+                paper_bgcolor: "rgba(0,0,0,0)",
+                plot_bgcolor: "rgba(0,0,0,0)",
+                margin: { l: 42, r: 18, t: 16, b: 60 },
+                xaxis: { tickangle: -18, showgrid: false },
+                yaxis: { gridcolor: "rgba(216, 207, 192, 0.35)" },
+                legend: { orientation: "h", y: 1.15 },
+              },
+              { responsive: true, displayModeBar: false }
+            );
+          }
+
+          const featureChart = document.getElementById("feature-chart");
+          if (featureChart) {
+            const features = data.models.classification.feature_importance || [];
+            Plotly.newPlot(
+              featureChart,
+              [
+                {
+                  x: features.map((item) => item.importance ?? item.weight ?? 0),
+                  y: features.map((item) => item.feature || item.name || ""),
+                  type: "bar",
+                  orientation: "h",
+                  marker: { color: "#58606b" },
+                },
+              ],
+              {
+                paper_bgcolor: "rgba(0,0,0,0)",
+                plot_bgcolor: "rgba(0,0,0,0)",
+                margin: { l: 150, r: 18, t: 16, b: 40 },
+                xaxis: { gridcolor: "rgba(216, 207, 192, 0.35)" },
+                yaxis: { automargin: true },
+              },
+              { responsive: true, displayModeBar: false }
+            );
+          }
+
+          const summary = document.getElementById("model-summary");
+          if (summary) {
+            const cls = data.models.classification;
+            const reg = data.models.regression;
+            summary.innerHTML = `
+              <div class="grid grid-3">
+                <div class="panel metric-card ${toneClass((cls.selected_metrics.accuracy ?? 0) - (cls.baseline_accuracy ?? 0))}">
+                  <div class="metric-label">分类模型</div>
+                  <div class="metric-value">${escapeHtml(cls.selected_model || "N/A")}</div>
+                  <div class="metric-detail">Accuracy ${formatPercent(cls.selected_metrics.accuracy)} | AUC ${formatPercent(cls.selected_metrics.roc_auc)}</div>
+                </div>
+                <div class="panel metric-card ${toneClass(reg.selected_metrics.r2 ?? 0)}">
+                  <div class="metric-label">回归模型</div>
+                  <div class="metric-value">${escapeHtml(reg.selected_model || "N/A")}</div>
+                  <div class="metric-detail">MAE ${formatNumber(reg.selected_metrics.mae, 4)} | R² ${formatNumber(reg.selected_metrics.r2, 4)}</div>
+                </div>
+                <div class="panel metric-card neutral">
+                  <div class="metric-label">回归方程</div>
+                  <div class="metric-value" style="font-size:1rem; line-height:1.45;">${escapeHtml(reg.ridge_equation || "未提供")}</div>
+                  <div class="metric-detail">用于解释性参考</div>
+                </div>
+              </div>
+            `;
+          }
+        }
+
+        function buildFundamentalCharts(data) {
+          const rows = data.quarterly || [];
+          const profitChart = document.getElementById("fundamentals-profit-chart");
+          if (profitChart) {
+            Plotly.newPlot(
+              profitChart,
+              [
+                {
+                  x: rows.map((row) => row.report_date),
+                  y: rows.map((row) => row.revenue),
+                  type: "bar",
+                  name: "营收",
+                  marker: { color: "rgba(198, 90, 46, 0.75)" },
+                },
+                {
+                  x: rows.map((row) => row.report_date),
+                  y: rows.map((row) => row.net_profit),
+                  type: "scatter",
+                  mode: "lines+markers",
+                  name: "净利润",
+                  line: { color: "#1f6f5f", width: 3 },
+                },
+              ],
+              {
+                paper_bgcolor: "rgba(0,0,0,0)",
+                plot_bgcolor: "rgba(0,0,0,0)",
+                margin: { l: 42, r: 18, t: 16, b: 40 },
+                xaxis: { showgrid: false },
+                yaxis: { gridcolor: "rgba(216, 207, 192, 0.35)" },
+                legend: { orientation: "h", y: 1.14 },
+              },
+              { responsive: true, displayModeBar: false }
+            );
+          }
+
+          const ratioChart = document.getElementById("fundamentals-ratio-chart");
+          if (ratioChart) {
+            Plotly.newPlot(
+              ratioChart,
+              [
+                {
+                  x: rows.map((row) => row.report_date),
+                  y: rows.map((row) => row.gross_margin),
+                  type: "scatter",
+                  mode: "lines+markers",
+                  name: "毛利率",
+                  line: { color: "#c65a2e", width: 3 },
+                },
+                {
+                  x: rows.map((row) => row.report_date),
+                  y: rows.map((row) => row.net_margin),
+                  type: "scatter",
+                  mode: "lines+markers",
+                  name: "净利率",
+                  line: { color: "#58606b", width: 3 },
+                },
+                {
+                  x: rows.map((row) => row.report_date),
+                  y: rows.map((row) => row.roe),
+                  type: "scatter",
+                  mode: "lines+markers",
+                  name: "ROE",
+                  line: { color: "#1f6f5f", width: 3 },
+                },
+              ],
+              {
+                paper_bgcolor: "rgba(0,0,0,0)",
+                plot_bgcolor: "rgba(0,0,0,0)",
+                margin: { l: 42, r: 18, t: 16, b: 40 },
+                xaxis: { showgrid: false },
+                yaxis: { gridcolor: "rgba(216, 207, 192, 0.35)" },
+                legend: { orientation: "h", y: 1.15 },
+              },
+              { responsive: true, displayModeBar: false }
+            );
+          }
+
+          const table = document.getElementById("fundamentals-table");
+          if (table) {
+            const body = rows
+              .map(
+                (row) => `
+                  <tr>
+                    <td>${escapeHtml(row.report_date)}</td>
+                    <td>${formatNumber(row.revenue, 3)}</td>
+                    <td>${formatNumber(row.net_profit, 3)}</td>
+                    <td>${formatNumber(row.gross_margin, 2)}</td>
+                    <td>${formatNumber(row.net_margin, 2)}</td>
+                    <td>${formatNumber(row.roe, 2)}</td>
+                    <td>${formatNumber(row.debt_ratio, 2)}</td>
+                    <td>${formatNumber(row.revenue_yoy, 2)}</td>
+                    <td>${formatNumber(row.profit_yoy, 2)}</td>
+                  </tr>
+                `
+              )
+              .join("");
+            table.innerHTML = body;
+          }
+        }
+
+        function initIndexPage(data) {
+          populateSummary(data);
+          renderStatusBanner(data);
+          setupWindowButtons(data);
+          renderHighlights(data);
+          buildImpactBars(data);
+          renderNewsFeed(data, { targetId: "news-feed", monthId: "news-month", sourceId: "news-source", impactId: "news-impact", limit: 8 });
+        }
+
+        function initNewsPage(data) {
+          renderStatusBanner(data);
+          renderNewsFeed(data, { targetId: "news-feed-full", monthId: "news-month-full", sourceId: "news-source-full", impactId: "news-impact-full", limit: data.news.length });
+          buildImpactBars(data);
+        }
+
+        function initModelPage(data) {
+          renderStatusBanner(data);
+          populateSummary(data);
+          buildModelCharts(data);
+        }
+
+        function initFundamentalsPage(data) {
+          renderStatusBanner(data);
+          buildFundamentalCharts(data);
+        }
+
+        document.addEventListener("DOMContentLoaded", async () => {
+          try {
+            const data = await loadDashboardData();
+            const page = document.body.dataset.page;
+            if (page === "home") initIndexPage(data);
+            if (page === "news") initNewsPage(data);
+            if (page === "model") initModelPage(data);
+            if (page === "fundamentals") initFundamentalsPage(data);
+          } catch (error) {
+            const banner = document.getElementById("status-banner");
+            if (banner) {
+              banner.className = "banner warning show";
+              banner.textContent = `页面加载失败：${error.message}`;
+            }
+          }
+        });
+        """
     )
 
-    output_path = output_path or (project_root / "reports" / "dashboard_snapshot.html")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(html, encoding="utf-8")
-    return output_path
+
+def build_index_page() -> str:
+    return (
+        render_head("当升科技 Dashboard | 总览", "home")
+        + dedent(
+            """\
+            <div id="status-banner" class="banner"></div>
+            <section class="hero">
+              <div class="hero-grid">
+                <div>
+                  <p class="eyebrow">Daily Signal</p>
+                  <h2 id="hero-headline" class="hero-title">载入中</h2>
+                  <p id="hero-subline" class="hero-meta">正在读取最新交易日信号。</p>
+                  <p id="generated-at" class="hero-meta"></p>
+                </div>
+                <div id="signal-panel" class="signal-meter"></div>
+              </div>
+            </section>
+
+            <section class="grid grid-3">
+              <div id="metric-close"></div>
+              <div id="metric-20d"></div>
+              <div id="metric-relative"></div>
+              <div id="metric-drawdown"></div>
+              <div id="metric-model"></div>
+              <div id="metric-news"></div>
+            </section>
+
+            <section class="grid grid-2" style="margin-top: 16px;">
+              <div class="panel">
+                <h2>股价与成交量</h2>
+                <p class="panel-subtitle">保留本地版的窗口切换，观察价格、量能和相对强弱。</p>
+                <div class="controls">
+                  <div class="button-group">
+                    <button class="button" data-window="3M">3M</button>
+                    <button class="button" data-window="6M">6M</button>
+                    <button class="button active" data-window="1Y">1Y</button>
+                    <button class="button" data-window="2Y">2Y</button>
+                  </div>
+                </div>
+                <div id="price-chart" class="chart"></div>
+              </div>
+              <div class="panel">
+                <h2>相对创业板表现</h2>
+                <p class="panel-subtitle">把股价和创业板指归一化后放在一起看，判断是否跑赢基准。</p>
+                <div id="performance-chart" class="chart"></div>
+              </div>
+            </section>
+
+            <section class="grid grid-2" style="margin-top: 16px;">
+              <div class="panel">
+                <h2>重点事件</h2>
+                <p class="panel-subtitle">保留最强正向和负向线索，给家里人看时信息密度会更高。</p>
+                <div class="highlight-list">
+                  <div id="positive-highlight"></div>
+                  <div id="negative-highlight"></div>
+                </div>
+              </div>
+              <div class="panel">
+                <h2>新闻方向分布</h2>
+                <p class="panel-subtitle">把近两年的消息按偏利多、中性、偏利空粗分。</p>
+                <div id="impact-chart" class="chart"></div>
+              </div>
+            </section>
+
+            <section class="panel" style="margin-top: 16px;">
+              <h2>最新消息流</h2>
+              <p class="panel-subtitle">这里是更像本地版的新闻区块，支持月份、来源、方向筛选。</p>
+              <div class="controls">
+                <select id="news-month"></select>
+                <select id="news-source"></select>
+                <select id="news-impact"></select>
+              </div>
+              <div id="news-feed" class="news-list"></div>
+            </section>
+            """
+        )
+        + render_footer()
+    )
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Render a static dashboard snapshot.")
+def build_news_page() -> str:
+    return (
+        render_head("当升科技 Dashboard | 新闻", "news")
+        + dedent(
+            """\
+            <div id="status-banner" class="banner"></div>
+            <section class="hero">
+              <div class="hero-grid">
+                <div>
+                  <p class="eyebrow">News Stream</p>
+                  <h2 class="hero-title">消息流与方向筛选</h2>
+                  <p class="hero-meta">把公告、研报、外部媒体合在一页里看，便于快速判断当天市场叙事。</p>
+                </div>
+                <div class="signal-meter">
+                  <div class="label">使用方式</div>
+                  <div class="value" style="font-size: 1.45rem;">先看方向</div>
+                  <div class="detail">先筛月份，再看来源，最后挑偏利多或偏利空。这样比顺着时间线硬刷更有效。</div>
+                </div>
+              </div>
+            </section>
+
+            <section class="grid grid-2">
+              <div class="panel">
+                <h2>新闻方向分布</h2>
+                <p class="panel-subtitle">用于看最近两年话题基调。</p>
+                <div id="impact-chart" class="chart"></div>
+              </div>
+              <div class="panel">
+                <h2>筛选器</h2>
+                <p class="panel-subtitle">静态站版本没有后端，但前端过滤已经足够做日常浏览。</p>
+                <div class="controls">
+                  <select id="news-month-full"></select>
+                  <select id="news-source-full"></select>
+                  <select id="news-impact-full"></select>
+                </div>
+              </div>
+            </section>
+
+            <section class="panel" style="margin-top: 16px;">
+              <h2>全部消息</h2>
+              <p class="panel-subtitle">按时间倒序展示，点击标题会跳原始链接。</p>
+              <div id="news-feed-full" class="news-list"></div>
+            </section>
+            """
+        )
+        + render_footer()
+    )
+
+
+def build_model_page() -> str:
+    return (
+        render_head("当升科技 Dashboard | 模型", "model")
+        + dedent(
+            """\
+            <div id="status-banner" class="banner"></div>
+            <section class="hero">
+              <div class="hero-grid">
+                <div>
+                  <p class="eyebrow">Model View</p>
+                  <h2 class="hero-title">当日信号与模型解释</h2>
+                  <p class="hero-meta">这里重点展示“今天的结论是什么、模型有没有明显优势、主要驱动是什么”。</p>
+                </div>
+                <div id="signal-panel" class="signal-meter"></div>
+              </div>
+            </section>
+
+            <section class="grid grid-3">
+              <div id="metric-close"></div>
+              <div id="metric-model"></div>
+              <div id="metric-news"></div>
+            </section>
+
+            <section class="panel" style="margin-top: 16px;">
+              <h2>模型摘要</h2>
+              <p class="panel-subtitle">分类模型关注方向，回归模型关注下一日收益率。</p>
+              <div id="model-summary"></div>
+            </section>
+
+            <section class="grid grid-2" style="margin-top: 16px;">
+              <div class="panel">
+                <h2>模型对比</h2>
+                <p class="panel-subtitle">看 accuracy 和 AUC 是否真正有优势。</p>
+                <div id="model-compare-chart" class="chart"></div>
+              </div>
+              <div class="panel">
+                <h2>特征重要性</h2>
+                <p class="panel-subtitle">新闻和财务特征有没有实际进入排序靠前的位置。</p>
+                <div id="feature-chart" class="chart"></div>
+              </div>
+            </section>
+            """
+        )
+        + render_footer()
+    )
+
+
+def build_fundamentals_page() -> str:
+    return (
+        render_head("当升科技 Dashboard | 基本面", "fundamentals")
+        + dedent(
+            """\
+            <div id="status-banner" class="banner"></div>
+            <section class="hero">
+              <div class="hero-grid">
+                <div>
+                  <p class="eyebrow">Fundamentals</p>
+                  <h2 class="hero-title">季度财务快照</h2>
+                  <p class="hero-meta">把公告生效后的财务指标拉进来，看收入、利润、毛利率和 ROE 是否同步改善。</p>
+                </div>
+                <div class="signal-meter">
+                  <div class="label">提示</div>
+                  <div class="value" style="font-size: 1.35rem;">适合中线跟踪</div>
+                  <div class="detail">短线信号要看模型页，中线判断要把业绩兑现、债务和利润同比一起看。</div>
+                </div>
+              </div>
+            </section>
+
+            <section class="grid grid-2">
+              <div class="panel">
+                <h2>营收与净利润</h2>
+                <p class="panel-subtitle">最新 8 个季度的财务快照。</p>
+                <div id="fundamentals-profit-chart" class="chart"></div>
+              </div>
+              <div class="panel">
+                <h2>毛利率、净利率与 ROE</h2>
+                <p class="panel-subtitle">利润质量比单看营收更关键。</p>
+                <div id="fundamentals-ratio-chart" class="chart"></div>
+              </div>
+            </section>
+
+            <section class="panel" style="margin-top: 16px;">
+              <h2>财务表</h2>
+              <p class="panel-subtitle">单位沿用抓取数据口径，适合作为快速对比视图。</p>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>报告期</th>
+                      <th>营收</th>
+                      <th>净利润</th>
+                      <th>毛利率</th>
+                      <th>净利率</th>
+                      <th>ROE</th>
+                      <th>资产负债率</th>
+                      <th>营收同比</th>
+                      <th>利润同比</th>
+                    </tr>
+                  </thead>
+                  <tbody id="fundamentals-table"></tbody>
+                </table>
+              </div>
+            </section>
+            """
+        )
+        + render_footer()
+    )
+
+
+def write_snapshot_site(project_root: Path, site_dir: Path) -> None:
+    payload = build_snapshot_payload(project_root)
+    if site_dir.exists():
+        shutil.rmtree(site_dir)
+    (site_dir / "assets").mkdir(parents=True, exist_ok=True)
+    (site_dir / "data").mkdir(parents=True, exist_ok=True)
+
+    (site_dir / "assets" / "styles.css").write_text(build_stylesheet(), encoding="utf-8")
+    (site_dir / "assets" / "app.js").write_text(build_javascript(), encoding="utf-8")
+    (site_dir / "assets" / "plotly.min.js").write_text(get_plotlyjs(), encoding="utf-8")
+    (site_dir / "data" / "dashboard.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (site_dir / "index.html").write_text(build_index_page(), encoding="utf-8")
+    (site_dir / "news.html").write_text(build_news_page(), encoding="utf-8")
+    (site_dir / "model.html").write_text(build_model_page(), encoding="utf-8")
+    (site_dir / "fundamentals.html").write_text(build_fundamentals_page(), encoding="utf-8")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Build a static multi-page dashboard site.")
     parser.add_argument(
         "--project-root",
         type=Path,
-        default=Path(__file__).resolve().parents[1],
-        help="Project root that contains data/, reports/, and models/.",
+        default=Path.cwd(),
+        help="Project root containing data/ and reports/.",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=None,
-        help="Optional output path for the generated HTML snapshot.",
+        default=Path("site/index.html"),
+        help="Output entry HTML path. The full site is written to its parent directory.",
     )
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    output = render_snapshot(args.project_root.resolve(), output_path=args.output.resolve() if args.output else None)
-    print(output)
-    return 0
+
+def main() -> None:
+    args = parse_args()
+    project_root = args.project_root.resolve()
+    output_path = args.output.resolve()
+    site_dir = output_path.parent
+    write_snapshot_site(project_root, site_dir)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

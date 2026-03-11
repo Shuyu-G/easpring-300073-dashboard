@@ -32,16 +32,22 @@ Run the local dashboard:
 .venv/bin/streamlit run dashboard_app.py
 ```
 
-Export a single-file static snapshot for sharing:
+Build the free public static site:
 
 ```bash
-.venv/bin/python -m src.dashboard_snapshot
+.venv/bin/python -m src.dashboard_snapshot --project-root . --output site/index.html
 ```
 
-This writes:
+This writes a multi-file static site under:
 
-- `reports/dashboard_snapshot.html`
-- or any custom path you pass with `--output`
+- `site/index.html`
+- `site/news.html`
+- `site/model.html`
+- `site/fundamentals.html`
+- `site/data/dashboard.json`
+- `site/assets/`
+
+The `--output` argument still points to the entry HTML path, but the generator writes the full site into its parent directory.
 
 The dashboard reads the latest files from:
 
@@ -76,7 +82,7 @@ What it does:
 
 - installs dependencies
 - refreshes prices, news, PDF text, and models
-- generates a static HTML dashboard at `site/index.html`
+- generates a multi-page static dashboard under `site/`
 - deploys that file to GitHub Pages
 
 Schedule:
