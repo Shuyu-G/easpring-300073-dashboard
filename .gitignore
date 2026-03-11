@@ -1,0 +1,13 @@
+.DS_Store
+.venv/
+__pycache__/
+*.pyc
+
+data/raw/
+data/processed/
+models/
+reports/analysis.md
+reports/metrics.json
+reports/dashboard_snapshot.html
+site/
+
