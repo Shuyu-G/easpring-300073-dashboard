@@ -49,7 +49,7 @@ def render_nav(current_page: str) -> str:
     return "".join(links)
 
 
-def render_head(title: str, page: str) -> str:
+def render_head(title: str, page: str, asset_version: str) -> str:
     return dedent(
         f"""\
         <!DOCTYPE html>
@@ -58,9 +58,10 @@ def render_head(title: str, page: str) -> str:
           <meta charset="utf-8" />
           <meta name="viewport" content="width=device-width, initial-scale=1" />
           <title>{title}</title>
-          <link rel="stylesheet" href="assets/styles.css" />
-          <script defer src="assets/plotly.min.js"></script>
-          <script defer src="assets/app.js"></script>
+          <link rel="stylesheet" href="assets/styles.css?v={asset_version}" />
+          <script>window.__DASHBOARD_VERSION__ = "{asset_version}";</script>
+          <script defer src="assets/plotly.min.js?v={asset_version}"></script>
+          <script defer src="assets/app.js?v={asset_version}"></script>
         </head>
         <body data-page="{page}">
           <div class="app-shell">
@@ -663,7 +664,8 @@ def build_javascript() -> str:
         };
 
         async function loadDashboardData() {
-          const response = await fetch("data/dashboard.json", { cache: "no-store" });
+          const version = encodeURIComponent(window.__DASHBOARD_VERSION__ || "");
+          const response = await fetch(`data/dashboard.json?v=${version}`, { cache: "no-store" });
           if (!response.ok) {
             throw new Error("Failed to load dashboard data");
           }
@@ -962,45 +964,61 @@ def build_javascript() -> str:
           const monthSelect = document.getElementById(options.monthId || "news-month");
           const sourceSelect = document.getElementById(options.sourceId || "news-source");
           const impactSelect = document.getElementById(options.impactId || "news-impact");
+          const countTarget = document.getElementById(options.countId || "");
 
           const allNews = data.news;
+          const allMonths = [...new Set(allNews.map((item) => item.month).filter(Boolean))];
+
+          function setOptions(selectNode, defaultLabel, values, currentValue) {
+            if (!selectNode) return "all";
+            selectNode.innerHTML = `<option value="all">${defaultLabel}</option>${values
+              .map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`)
+              .join("")}`;
+            const nextValue = values.includes(currentValue) ? currentValue : "all";
+            selectNode.value = nextValue;
+            return nextValue;
+          }
+
           if (monthSelect && !monthSelect.dataset.ready) {
-            const months = [...new Set(allNews.map((item) => item.month).filter(Boolean))];
-            monthSelect.innerHTML = `<option value="all">全部月份</option>${months
+            monthSelect.innerHTML = `<option value="all">全部月份</option>${allMonths
               .map((month) => `<option value="${escapeHtml(month)}">${escapeHtml(month)}</option>`)
               .join("")}`;
             monthSelect.dataset.ready = "true";
           }
-          if (sourceSelect && !sourceSelect.dataset.ready) {
-            const sources = [...new Set(allNews.map((item) => item.source_label).filter(Boolean))];
-            sourceSelect.innerHTML = `<option value="all">全部来源</option>${sources
-              .map((source) => `<option value="${escapeHtml(source)}">${escapeHtml(source)}</option>`)
-              .join("")}`;
-            sourceSelect.dataset.ready = "true";
-          }
-          if (impactSelect && !impactSelect.dataset.ready) {
-            impactSelect.innerHTML = `
-              <option value="all">全部方向</option>
-              <option value="偏利多">偏利多</option>
-              <option value="中性">中性</option>
-              <option value="偏利空">偏利空</option>
-            `;
-            impactSelect.dataset.ready = "true";
-          }
 
           const rerender = () => {
             const month = monthSelect ? monthSelect.value : "all";
-            const source = sourceSelect ? sourceSelect.value : "all";
-            const impact = impactSelect ? impactSelect.value : "all";
+            const monthScopedRows = allNews.filter((item) => month === "all" || item.month === month);
+
+            const sourceOptions = [...new Set(monthScopedRows.map((item) => item.source_label).filter(Boolean))];
+            const source = setOptions(
+              sourceSelect,
+              "全部来源",
+              sourceOptions,
+              sourceSelect ? sourceSelect.value : "all"
+            );
+
+            const sourceScopedRows = monthScopedRows.filter((item) => source === "all" || item.source_label === source);
+            const impactOptions = [...new Set(sourceScopedRows.map((item) => item.impact).filter(Boolean))];
+            const impact = setOptions(
+              impactSelect,
+              "全部方向",
+              impactOptions,
+              impactSelect ? impactSelect.value : "all"
+            );
+
             const limit = options.limit || allNews.length;
-            const rows = allNews
-              .filter((item) => month === "all" || item.month === month)
+            const rows = monthScopedRows
               .filter((item) => source === "all" || item.source_label === source)
               .filter((item) => impact === "all" || item.impact === impact)
               .slice(0, limit);
 
+            if (countTarget) {
+              countTarget.textContent = `当前筛选结果 ${rows.length} 条`;
+            }
+
             if (!rows.length) {
-              target.innerHTML = `<div class="empty-state">当前筛选条件下没有新闻。</div>`;
+              target.innerHTML = `<div class="empty-state">当前筛选条件下没有新闻。你可以把来源或方向切回“全部”。</div>`;
               return;
             }
 
@@ -1222,12 +1240,12 @@ def build_javascript() -> str:
           setupWindowButtons(data);
           renderHighlights(data);
           buildImpactBars(data);
-          renderNewsFeed(data, { targetId: "news-feed", monthId: "news-month", sourceId: "news-source", impactId: "news-impact", limit: 8 });
+          renderNewsFeed(data, { targetId: "news-feed", monthId: "news-month", sourceId: "news-source", impactId: "news-impact", countId: "news-count", limit: 8 });
         }
 
         function initNewsPage(data) {
           renderStatusBanner(data);
-          renderNewsFeed(data, { targetId: "news-feed-full", monthId: "news-month-full", sourceId: "news-source-full", impactId: "news-impact-full", limit: data.news.length });
+          renderNewsFeed(data, { targetId: "news-feed-full", monthId: "news-month-full", sourceId: "news-source-full", impactId: "news-impact-full", countId: "news-count-full", limit: data.news.length });
           buildImpactBars(data);
         }
 
@@ -1264,7 +1282,7 @@ def build_javascript() -> str:
 
 def build_index_page() -> str:
     return (
-        render_head("当升科技 Dashboard | 总览", "home")
+        render_head("当升科技 Dashboard | 总览", "home", asset_version="__ASSET_VERSION__")
         + dedent(
             """\
             <div id="status-banner" class="banner"></div>
@@ -1326,16 +1344,17 @@ def build_index_page() -> str:
               </div>
             </section>
 
-            <section class="panel" style="margin-top: 16px;">
-              <h2>最新消息流</h2>
-              <p class="panel-subtitle">这里是更像本地版的新闻区块，支持月份、来源、方向筛选。</p>
-              <div class="controls">
-                <select id="news-month"></select>
-                <select id="news-source"></select>
-                <select id="news-impact"></select>
-              </div>
-              <div id="news-feed" class="news-list"></div>
-            </section>
+<section class="panel" style="margin-top: 16px;">
+  <h2>最新消息流</h2>
+  <p class="panel-subtitle">这里是更像本地版的新闻区块，支持月份、来源、方向筛选。</p>
+  <div class="controls">
+    <select id="news-month"></select>
+    <select id="news-source"></select>
+    <select id="news-impact"></select>
+  </div>
+  <p id="news-count" class="panel-subtitle"></p>
+  <div id="news-feed" class="news-list"></div>
+</section>
             """
         )
         + render_footer()
@@ -1344,7 +1363,7 @@ def build_index_page() -> str:
 
 def build_news_page() -> str:
     return (
-        render_head("当升科技 Dashboard | 新闻", "news")
+        render_head("当升科技 Dashboard | 新闻", "news", asset_version="__ASSET_VERSION__")
         + dedent(
             """\
             <div id="status-banner" class="banner"></div>
@@ -1383,6 +1402,7 @@ def build_news_page() -> str:
             <section class="panel" style="margin-top: 16px;">
               <h2>全部消息</h2>
               <p class="panel-subtitle">按时间倒序展示，点击标题会跳原始链接。</p>
+              <p id="news-count-full" class="panel-subtitle"></p>
               <div id="news-feed-full" class="news-list"></div>
             </section>
             """
@@ -1393,7 +1413,7 @@ def build_news_page() -> str:
 
 def build_model_page() -> str:
     return (
-        render_head("当升科技 Dashboard | 模型", "model")
+        render_head("当升科技 Dashboard | 模型", "model", asset_version="__ASSET_VERSION__")
         + dedent(
             """\
             <div id="status-banner" class="banner"></div>
@@ -1440,7 +1460,7 @@ def build_model_page() -> str:
 
 def build_fundamentals_page() -> str:
     return (
-        render_head("当升科技 Dashboard | 基本面", "fundamentals")
+        render_head("当升科技 Dashboard | 基本面", "fundamentals", asset_version="__ASSET_VERSION__")
         + dedent(
             """\
             <div id="status-banner" class="banner"></div>
@@ -1502,6 +1522,7 @@ def build_fundamentals_page() -> str:
 
 def write_snapshot_site(project_root: Path, site_dir: Path) -> None:
     payload = build_snapshot_payload(project_root)
+    asset_version = payload["generated_at"].replace("-", "").replace(":", "").replace("+", "").replace("T", "")
     if site_dir.exists():
         shutil.rmtree(site_dir)
     (site_dir / "assets").mkdir(parents=True, exist_ok=True)
@@ -1514,10 +1535,22 @@ def write_snapshot_site(project_root: Path, site_dir: Path) -> None:
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    (site_dir / "index.html").write_text(build_index_page(), encoding="utf-8")
-    (site_dir / "news.html").write_text(build_news_page(), encoding="utf-8")
-    (site_dir / "model.html").write_text(build_model_page(), encoding="utf-8")
-    (site_dir / "fundamentals.html").write_text(build_fundamentals_page(), encoding="utf-8")
+    (site_dir / "index.html").write_text(
+        build_index_page().replace("__ASSET_VERSION__", asset_version),
+        encoding="utf-8",
+    )
+    (site_dir / "news.html").write_text(
+        build_news_page().replace("__ASSET_VERSION__", asset_version),
+        encoding="utf-8",
+    )
+    (site_dir / "model.html").write_text(
+        build_model_page().replace("__ASSET_VERSION__", asset_version),
+        encoding="utf-8",
+    )
+    (site_dir / "fundamentals.html").write_text(
+        build_fundamentals_page().replace("__ASSET_VERSION__", asset_version),
+        encoding="utf-8",
+    )
 
 
 def parse_args() -> argparse.Namespace:
