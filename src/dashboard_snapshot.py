@@ -86,6 +86,7 @@ def build_snapshot_payload(payload: dict[str, object]) -> dict[str, object]:
                 "selected_model": metrics["classification"]["selected_model"],
                 "selected_metrics": metrics["classification"]["selected_metrics"],
                 "baseline_accuracy": metrics["classification"]["baseline_accuracy"],
+                "candidates": metrics["classification"]["candidates"],
                 "feature_importance": metrics["classification"]["feature_importance"][:12],
             },
             "regression": {
@@ -206,6 +207,28 @@ def render_snapshot(project_root: Path, output_path: Path | None = None) -> Path
           font-size: 13px;
           color: #49524e;
         }
+        .status-banner {
+          display: none;
+          margin: 0 0 18px;
+          padding: 14px 16px;
+          border-radius: 18px;
+          border: 1px solid var(--line);
+          font-size: 14px;
+          line-height: 1.6;
+          box-shadow: 0 10px 24px rgba(86,96,107,0.06);
+        }
+        .status-banner.ok {
+          display: block;
+          background: rgba(31,111,95,0.10);
+          border-color: rgba(31,111,95,0.30);
+          color: #234a40;
+        }
+        .status-banner.warn {
+          display: block;
+          background: rgba(198,90,46,0.10);
+          border-color: rgba(198,90,46,0.35);
+          color: #6d3f25;
+        }
         .cards {
           display: grid;
           grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -280,6 +303,59 @@ def render_snapshot(project_root: Path, output_path: Path | None = None) -> Path
           margin: 2px 0 8px;
           font-size: 19px;
         }
+        .signal-grid {
+          display: grid;
+          grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
+          gap: 16px;
+          margin-bottom: 18px;
+        }
+        .signal-hero {
+          display: grid;
+          grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+          gap: 16px;
+          align-items: stretch;
+        }
+        .signal-box {
+          border: 1px solid var(--line);
+          border-radius: 18px;
+          background: rgba(255,255,255,0.72);
+          padding: 14px 16px;
+        }
+        .signal-box h3 {
+          margin: 0 0 10px;
+          font-size: 16px;
+        }
+        .signal-number {
+          font-size: 34px;
+          font-weight: 700;
+          margin: 4px 0;
+        }
+        .signal-copy {
+          color: #54605c;
+          font-size: 14px;
+          line-height: 1.7;
+        }
+        .mini-metrics {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 12px;
+          margin-top: 12px;
+        }
+        .mini-metric {
+          border: 1px solid #e6ddd0;
+          border-radius: 14px;
+          padding: 10px 12px;
+          background: rgba(255,255,255,0.74);
+        }
+        .mini-label {
+          font-size: 12px;
+          color: #65706c;
+          margin-bottom: 4px;
+        }
+        .mini-value {
+          font-size: 19px;
+          font-weight: 700;
+        }
         .panel p {
           margin: 0 0 10px;
           color: #5e6763;
@@ -338,7 +414,7 @@ def render_snapshot(project_root: Path, output_path: Path | None = None) -> Path
           margin-top: 12px;
         }
         @media (max-width: 960px) {
-          .cards, .grid-2 {
+          .cards, .grid-2, .signal-grid, .signal-hero, .mini-metrics {
             grid-template-columns: 1fr;
           }
           .hero h1 {
@@ -366,7 +442,72 @@ def render_snapshot(project_root: Path, output_path: Path | None = None) -> Path
           </div>
         </section>
 
+        <section id="status-banner" class="status-banner"></section>
+
         <section class="cards">__CARDS__</section>
+
+        <section class="signal-grid">
+          <div class="panel">
+            <h2>当日信号</h2>
+            <p>这是最重要的一块。它告诉你模型对下一交易日的方向判断、收益倾向，以及这套判断到底靠不靠谱。</p>
+            <div class="signal-hero">
+              <div id="signal-gauge" class="plot" style="min-height:280px;"></div>
+              <div class="signal-box">
+                <h3 id="signal-headline">信号摘要</h3>
+                <div id="signal-main-number" class="signal-number">--</div>
+                <div id="signal-copy" class="signal-copy"></div>
+                <div class="mini-metrics">
+                  <div class="mini-metric">
+                    <div class="mini-label">预测收益率</div>
+                    <div id="signal-return" class="mini-value">--</div>
+                  </div>
+                  <div class="mini-metric">
+                    <div class="mini-label">20日涨跌</div>
+                    <div id="signal-20d" class="mini-value">--</div>
+                  </div>
+                  <div class="mini-metric">
+                    <div class="mini-label">分类准确率</div>
+                    <div id="signal-accuracy" class="mini-value">--</div>
+                  </div>
+                  <div class="mini-metric">
+                    <div class="mini-label">多数基线</div>
+                    <div id="signal-baseline" class="mini-value">--</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="panel">
+            <h2>更新监控</h2>
+            <p>用来判断这个站点是不是还在正常更新，避免你几周之后才发现它静默停了。</p>
+            <div class="signal-box">
+              <h3>站点健康状态</h3>
+              <div id="monitor-headline" class="signal-number">--</div>
+              <div id="monitor-copy" class="signal-copy"></div>
+              <div class="mini-metrics">
+                <div class="mini-metric">
+                  <div class="mini-label">最新生成时间</div>
+                  <div id="monitor-generated" class="mini-value" style="font-size:16px;">--</div>
+                </div>
+                <div class="mini-metric">
+                  <div class="mini-label">最近交易日</div>
+                  <div id="monitor-trade-date" class="mini-value" style="font-size:16px;">--</div>
+                </div>
+                <div class="mini-metric">
+                  <div class="mini-label">最近 7 天消息</div>
+                  <div id="monitor-news" class="mini-value">--</div>
+                </div>
+                <div class="mini-metric">
+                  <div class="mini-label">PDF 覆盖</div>
+                  <div id="monitor-pdf" class="mini-value">--</div>
+                </div>
+              </div>
+              <div class="footnote" style="margin-top:14px;">
+                如果这里显示“更新滞后”，优先检查仓库的 Actions 页面是否有失败记录。
+              </div>
+            </div>
+          </div>
+        </section>
 
         <section class="panel" style="margin-bottom:18px;">
           <h2>时间窗口</h2>
@@ -417,6 +558,19 @@ def render_snapshot(project_root: Path, output_path: Path | None = None) -> Path
             <h2>毛利率 / 净利率 / ROE</h2>
             <p>更偏经营质量视角。</p>
             <div id="margin-chart" class="plot"></div>
+          </div>
+        </section>
+
+        <section class="grid-2">
+          <div class="panel">
+            <h2>模型对比</h2>
+            <p>看当前选中的分类模型是不是明显优于其它候选模型。</p>
+            <div id="model-compare-chart" class="plot"></div>
+          </div>
+          <div class="panel">
+            <h2>模型最看重的特征</h2>
+            <p>这不是当日逐笔归因，但能告诉你模型大体更重视什么。</p>
+            <div id="feature-chart" class="plot"></div>
           </div>
         </section>
 
@@ -668,6 +822,149 @@ def render_snapshot(project_root: Path, output_path: Path | None = None) -> Path
           );
         }
 
+        function renderSignalPanel() {
+          const forecast = payload.metrics.forecast;
+          const descriptive = payload.metrics.descriptive_summary;
+          const cls = payload.metrics.classification;
+          const upProbability = Number(forecast.next_up_probability || 0) * 100;
+          const predictedReturn = Number(forecast.predicted_return || 0);
+          const accuracy = Number(cls.selected_metrics.accuracy || 0);
+          const baseline = Number(cls.baseline_accuracy || 0);
+
+          Plotly.react(
+            "signal-gauge",
+            [
+              {
+                type: "indicator",
+                mode: "gauge+number",
+                value: upProbability,
+                number: {suffix: "%", font: {size: 34}},
+                title: {text: "下一交易日上涨概率"},
+                gauge: {
+                  axis: {range: [0, 100]},
+                  bar: {color: colorUp},
+                  steps: [
+                    {range: [0, 40], color: "rgba(31,111,95,0.18)"},
+                    {range: [40, 60], color: "rgba(88,96,107,0.15)"},
+                    {range: [60, 100], color: "rgba(198,90,46,0.18)"},
+                  ],
+                  threshold: {line: {color: "#1d2320", width: 4}, value: 50},
+                },
+              },
+            ],
+            {
+              height: 280,
+              margin: {l: 8, r: 8, t: 14, b: 8},
+              paper_bgcolor: "rgba(255,255,255,0.72)",
+            },
+            {responsive: true, displayModeBar: false}
+          );
+
+          document.getElementById("signal-headline").textContent = `模型标签：${forecast.label}`;
+          document.getElementById("signal-main-number").textContent = `${upProbability.toFixed(1)}%`;
+          document.getElementById("signal-copy").textContent =
+            `对 ${forecast.next_session_date} 的判断是“${forecast.label}”。如果你只看一个数字，就看上涨概率和预测收益率；如果这两个都接近中轴，就说明它不是高确信度信号。`;
+          document.getElementById("signal-return").textContent = `${(predictedReturn * 100).toFixed(2)}%`;
+          document.getElementById("signal-20d").textContent = `${(Number(descriptive.latest_20d_return || 0) * 100).toFixed(2)}%`;
+          document.getElementById("signal-accuracy").textContent = `${(accuracy * 100).toFixed(1)}%`;
+          document.getElementById("signal-baseline").textContent = `${(baseline * 100).toFixed(1)}%`;
+        }
+
+        function renderStatusBanner() {
+          const generatedAt = new Date(payload.metrics.config.generated_at);
+          const now = new Date();
+          const ageHours = (now - generatedAt) / 36e5;
+          const banner = document.getElementById("status-banner");
+          const actionsUrl = "https://github.com/Shuyu-G/easpring-300073-dashboard/actions";
+          const stale = ageHours > 54;
+          banner.className = `status-banner ${stale ? "warn" : "ok"}`;
+          banner.innerHTML = stale
+            ? `更新提醒：这份页面距离上次成功生成已经超过 <strong>${Math.round(ageHours)}</strong> 小时，可能自动更新停了。请检查 <a href="${actionsUrl}" target="_blank" rel="noreferrer">GitHub Actions</a>。`
+            : `更新状态正常：页面最近一次成功生成于 <strong>${generatedAt.toLocaleString("zh-CN")}</strong>，目前看起来还在按计划工作。`;
+
+          document.getElementById("monitor-headline").textContent = stale ? "更新滞后" : "更新正常";
+          document.getElementById("monitor-copy").textContent = stale
+            ? "这通常意味着最近的定时任务失败了，或者没有按预期执行。"
+            : "最近的自动更新仍在工作，当前页面不是本地缓存旧页面。";
+          document.getElementById("monitor-generated").textContent = generatedAt.toLocaleString("zh-CN");
+          document.getElementById("monitor-trade-date").textContent = payload.prices[payload.prices.length - 1].date;
+          document.getElementById("monitor-news").textContent = String(
+            payload.news.filter((row) => {
+              const diff = (new Date(payload.prices[payload.prices.length - 1].date) - new Date(row.effective_date)) / 86400000;
+              return diff <= 7;
+            }).length
+          );
+          document.getElementById("monitor-pdf").textContent = String(payload.metrics.data_summary.pdf_extract_ok || 0);
+        }
+
+        function renderModelCharts() {
+          const candidates = payload.metrics.classification.candidates || [];
+          Plotly.react(
+            "model-compare-chart",
+            [
+              {
+                x: candidates.map((row) => row.name),
+                y: candidates.map((row) => Number(row.accuracy || 0)),
+                type: "bar",
+                name: "准确率",
+                marker: {color: "rgba(31,111,95,0.82)"},
+              },
+              {
+                x: candidates.map((row) => row.name),
+                y: candidates.map((row) => Number(row.balanced_accuracy || 0)),
+                type: "bar",
+                name: "平衡准确率",
+                marker: {color: "rgba(198,90,46,0.82)"},
+              },
+              {
+                x: candidates.map((row) => row.name),
+                y: candidates.map((row) => Number(row.roc_auc || 0)),
+                type: "bar",
+                name: "ROC AUC",
+                marker: {color: "rgba(139,111,71,0.82)"},
+              },
+            ],
+            {
+              barmode: "group",
+              height: 320,
+              margin: {l: 36, r: 18, t: 10, b: 30},
+              paper_bgcolor: "rgba(0,0,0,0)",
+              plot_bgcolor: "rgba(255,255,255,0.72)",
+              legend: {orientation: "h", y: 1.1, x: 0},
+              yaxis: {gridcolor: "rgba(120,120,120,0.15)"},
+              xaxis: {showgrid: false},
+            },
+            {responsive: true, displayModeBar: false}
+          );
+
+          const importance = (payload.metrics.classification.feature_importance || [])
+            .slice()
+            .sort((a, b) => Number(a.importance || 0) - Number(b.importance || 0));
+          Plotly.react(
+            "feature-chart",
+            [
+              {
+                x: importance.map((row) => Number(row.importance || 0)),
+                y: importance.map((row) => row.feature),
+                type: "bar",
+                orientation: "h",
+                marker: {
+                  color: importance.map((row) => Number(row.importance || 0) >= 0 ? colorUp : colorDown),
+                },
+              },
+            ],
+            {
+              height: 320,
+              margin: {l: 96, r: 18, t: 10, b: 30},
+              paper_bgcolor: "rgba(0,0,0,0)",
+              plot_bgcolor: "rgba(255,255,255,0.72)",
+              xaxis: {gridcolor: "rgba(120,120,120,0.15)"},
+              yaxis: {showgrid: false},
+            },
+            {responsive: true, displayModeBar: false}
+          );
+        }
+
         function populateNewsFilters() {
           const monthSelect = document.getElementById("news-month");
           const sourceSelect = document.getElementById("news-source");
@@ -752,13 +1049,16 @@ def render_snapshot(project_root: Path, output_path: Path | None = None) -> Path
         }
 
         function init() {
+          renderStatusBanner();
           activeRangeButtons();
           populateNewsFilters();
           bindControls();
+          renderSignalPanel();
           renderPriceCharts();
           renderRelativeChart();
           renderNewsMonthlyChart();
           renderFundamentalCharts();
+          renderModelCharts();
           renderNewsTable();
           renderPositiveNegative();
         }
