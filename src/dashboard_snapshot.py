@@ -1382,26 +1382,20 @@ def build_news_page() -> str:
               </div>
             </section>
 
-            <section class="grid grid-2">
-              <div class="panel">
-                <h2>新闻方向分布</h2>
-                <p class="panel-subtitle">用于看最近两年话题基调。</p>
-                <div id="impact-chart" class="chart"></div>
-              </div>
-              <div class="panel">
-                <h2>筛选器</h2>
-                <p class="panel-subtitle">静态站版本没有后端，但前端过滤已经足够做日常浏览。</p>
-                <div class="controls">
-                  <select id="news-month-full"></select>
-                  <select id="news-source-full"></select>
-                  <select id="news-impact-full"></select>
-                </div>
-              </div>
+            <section class="panel">
+              <h2>新闻方向分布</h2>
+              <p class="panel-subtitle">先看整体基调，再去下面筛消息流。</p>
+              <div id="impact-chart" class="chart"></div>
             </section>
 
             <section class="panel" style="margin-top: 16px;">
               <h2>全部消息</h2>
-              <p class="panel-subtitle">按时间倒序展示，点击标题会跳原始链接。</p>
+              <p class="panel-subtitle">筛选器直接作用于下面这段消息流，按时间倒序展示，点击标题会跳原始链接。</p>
+              <div class="controls">
+                <select id="news-month-full"></select>
+                <select id="news-source-full"></select>
+                <select id="news-impact-full"></select>
+              </div>
               <p id="news-count-full" class="panel-subtitle"></p>
               <div id="news-feed-full" class="news-list"></div>
             </section>
