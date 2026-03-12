@@ -33,6 +33,7 @@ from sklearn.ensemble import (
     RandomForestRegressor,
 )
 from sklearn.impute import SimpleImputer
+from sklearn.inspection import permutation_importance
 from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.metrics import (
     accuracy_score,
@@ -1243,12 +1244,27 @@ def extract_feature_importance(
     fitted_model: Pipeline,
     feature_columns: list[str],
     top_n: int = 12,
+    evaluation_frame: pd.DataFrame | None = None,
+    evaluation_target: pd.Series | np.ndarray | None = None,
+    scoring: str | None = None,
 ) -> list[dict[str, Any]]:
     model = fitted_model.named_steps["model"]
     if hasattr(model, "feature_importances_"):
         values = model.feature_importances_
     elif hasattr(model, "coef_"):
         values = model.coef_[0]
+    elif evaluation_frame is not None and evaluation_target is not None:
+        if len(evaluation_frame) < 10 or pd.Series(evaluation_target).nunique() < 2:
+            return []
+        permutation = permutation_importance(
+            fitted_model,
+            evaluation_frame,
+            evaluation_target,
+            n_repeats=12,
+            random_state=42,
+            scoring=scoring,
+        )
+        values = permutation.importances_mean
     else:
         return []
 
@@ -1586,6 +1602,7 @@ def train_models(config: PipelineConfig, paths: PipelinePaths) -> dict[str, Any]
     }
 
     classification_results: list[dict[str, Any]] = []
+    classification_fitted_models: dict[str, dict[str, Any]] = {}
     for name, candidate in classification_candidates.items():
         candidate_features = candidate["features"]
         threshold_details = {"decision_threshold": 0.5, "threshold_source": "fixed"}
@@ -1603,6 +1620,7 @@ def train_models(config: PipelineConfig, paths: PipelinePaths) -> dict[str, Any]
         else:
             model = candidate["pipeline"]
             model.fit(train_df[candidate_features], y_train)
+        classification_fitted_models[name] = {"model": model, "features": candidate_features}
         probabilities = positive_class_probabilities(model, test_df[candidate_features])
         predictions = (probabilities >= threshold_details["decision_threshold"]).astype(int)
         classification_results.append(
@@ -1630,6 +1648,14 @@ def train_models(config: PipelineConfig, paths: PipelinePaths) -> dict[str, Any]
     best_classification = select_best_model(classification_results, ["balanced_accuracy", "roc_auc"])
     direction_candidate = classification_candidates[best_classification["name"]]
     direction_feature_columns = direction_candidate["features"]
+    heldout_direction_model = classification_fitted_models[best_classification["name"]]["model"]
+    heldout_feature_importance = extract_feature_importance(
+        heldout_direction_model,
+        direction_feature_columns,
+        evaluation_frame=test_df[direction_feature_columns],
+        evaluation_target=y_test,
+        scoring="balanced_accuracy",
+    )
     if direction_candidate.get("hyperparameter_mode") == "time_series_cv":
         tuned_result = tune_random_forest_with_time_series_cv(
             training_data[direction_feature_columns],
@@ -1806,7 +1832,7 @@ def train_models(config: PipelineConfig, paths: PipelinePaths) -> dict[str, Any]
             "baseline_accuracy": float(max(y_test.mean(), 1 - y_test.mean())),
             "candidates": classification_results,
             "selected_metrics": best_classification,
-            "feature_importance": extract_feature_importance(direction_model, direction_feature_columns),
+            "feature_importance": heldout_feature_importance,
             "feature_sets": {
                 "extended": extended_feature_columns,
                 "random_forest_selected": selected_rf_feature_columns,
