@@ -42,7 +42,6 @@ from sklearn.metrics import (
     r2_score,
     roc_auc_score,
 )
-from sklearn.base import clone
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -65,6 +64,16 @@ GOLD_STYLE_RF_FEATURES = [
     "daily_return",
     "news_sentiment_mean",
     "news_count",
+]
+RANDOM_FOREST_TUNING_GRID = [
+    {
+        "n_estimators": n_estimators,
+        "max_depth": max_depth,
+        "min_samples_leaf": min_samples_leaf,
+    }
+    for n_estimators in (200, 400)
+    for max_depth in (4, 6, 8)
+    for min_samples_leaf in (1, 3, 5)
 ]
 DISCLOSURE_INCLUDE_KEYWORDS = [
     "年报",
@@ -1241,6 +1250,31 @@ def extract_feature_importance(fitted_model: Pipeline, feature_columns: list[str
     ]
 
 
+def build_random_forest_classifier_pipeline(
+    *,
+    n_estimators: int = 400,
+    max_depth: int | None = 6,
+    min_samples_leaf: int = 5,
+    class_weight: str | None = "balanced",
+    random_state: int = 42,
+) -> Pipeline:
+    return Pipeline(
+        [
+            ("imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
+            (
+                "model",
+                RandomForestClassifier(
+                    n_estimators=n_estimators,
+                    max_depth=max_depth,
+                    min_samples_leaf=min_samples_leaf,
+                    class_weight=class_weight,
+                    random_state=random_state,
+                ),
+            ),
+        ]
+    )
+
+
 def positive_class_probabilities(fitted_model: Pipeline, frame: pd.DataFrame) -> np.ndarray:
     probabilities = fitted_model.predict_proba(frame)
     classes = getattr(fitted_model, "classes_", None)
@@ -1284,79 +1318,126 @@ def choose_best_threshold(targets: np.ndarray, probabilities: np.ndarray) -> dic
     return best_result or {"decision_threshold": 0.5, "accuracy": 0.0, "balanced_accuracy": 0.0}
 
 
-def tune_threshold_with_time_series_cv(
-    candidate_pipeline: Pipeline,
+def tune_random_forest_with_time_series_cv(
     X_train: pd.DataFrame,
     y_train: pd.Series,
     n_splits: int = 5,
 ) -> dict[str, Any]:
     if len(X_train) < 80 or y_train.nunique() < 2:
         return {
+            "pipeline": build_random_forest_classifier_pipeline(),
+            "tuned_params": {
+                "n_estimators": 400,
+                "max_depth": 6,
+                "min_samples_leaf": 5,
+            },
             "decision_threshold": 0.5,
             "threshold_source": "default",
             "cv_folds": 0,
             "cv_accuracy": None,
             "cv_balanced_accuracy": None,
             "cv_roc_auc": None,
+            "hyperparameter_source": "default",
         }
 
     max_splits = min(n_splits, len(X_train) - 1)
     if max_splits < 2:
         return {
+            "pipeline": build_random_forest_classifier_pipeline(),
+            "tuned_params": {
+                "n_estimators": 400,
+                "max_depth": 6,
+                "min_samples_leaf": 5,
+            },
             "decision_threshold": 0.5,
             "threshold_source": "default",
             "cv_folds": 0,
             "cv_accuracy": None,
             "cv_balanced_accuracy": None,
             "cv_roc_auc": None,
+            "hyperparameter_source": "default",
         }
 
-    splitter = TimeSeriesSplit(n_splits=max_splits)
-    oof_probabilities: list[np.ndarray] = []
-    oof_targets: list[np.ndarray] = []
-    valid_folds = 0
+    best_result: dict[str, Any] | None = None
+    base_splitter = TimeSeriesSplit(n_splits=max_splits)
 
-    for fold_train_idx, fold_valid_idx in splitter.split(X_train):
-        fold_X_train = X_train.iloc[fold_train_idx]
-        fold_y_train = y_train.iloc[fold_train_idx]
-        fold_X_valid = X_train.iloc[fold_valid_idx]
-        fold_y_valid = y_train.iloc[fold_valid_idx]
-        if fold_X_train.empty or fold_X_valid.empty:
+    for params in RANDOM_FOREST_TUNING_GRID:
+        oof_probabilities: list[np.ndarray] = []
+        oof_targets: list[np.ndarray] = []
+        valid_folds = 0
+
+        for fold_train_idx, fold_valid_idx in base_splitter.split(X_train):
+            fold_X_train = X_train.iloc[fold_train_idx]
+            fold_y_train = y_train.iloc[fold_train_idx]
+            fold_X_valid = X_train.iloc[fold_valid_idx]
+            fold_y_valid = y_train.iloc[fold_valid_idx]
+            if fold_X_train.empty or fold_X_valid.empty:
+                continue
+
+            fold_model = build_random_forest_classifier_pipeline(**params)
+            fold_model.fit(fold_X_train, fold_y_train)
+            fold_probabilities = positive_class_probabilities(fold_model, fold_X_valid)
+            oof_probabilities.append(fold_probabilities)
+            oof_targets.append(fold_y_valid.to_numpy())
+            valid_folds += 1
+
+        if valid_folds < 2:
             continue
 
-        fold_model = clone(candidate_pipeline)
-        fold_model.fit(fold_X_train, fold_y_train)
-        fold_probabilities = positive_class_probabilities(fold_model, fold_X_valid)
-        oof_probabilities.append(fold_probabilities)
-        oof_targets.append(fold_y_valid.to_numpy())
-        valid_folds += 1
+        cv_probabilities = np.concatenate(oof_probabilities)
+        cv_targets = np.concatenate(oof_targets)
+        threshold_result = choose_best_threshold(cv_targets, cv_probabilities)
+        cv_roc_auc = (
+            float(roc_auc_score(cv_targets, cv_probabilities))
+            if len(np.unique(cv_targets)) > 1
+            else None
+        )
+        result = {
+            "tuned_params": params,
+            "decision_threshold": threshold_result["decision_threshold"],
+            "threshold_source": "time_series_cv",
+            "cv_folds": valid_folds,
+            "cv_accuracy": threshold_result["accuracy"],
+            "cv_balanced_accuracy": threshold_result["balanced_accuracy"],
+            "cv_roc_auc": cv_roc_auc,
+            "hyperparameter_source": "time_series_cv",
+        }
+        rank = (
+            result["cv_balanced_accuracy"],
+            result["cv_roc_auc"] if result["cv_roc_auc"] is not None else -1.0,
+            result["cv_accuracy"],
+            -abs(result["decision_threshold"] - 0.5),
+        )
+        if best_result is None or rank > (
+            best_result["cv_balanced_accuracy"],
+            best_result["cv_roc_auc"] if best_result["cv_roc_auc"] is not None else -1.0,
+            best_result["cv_accuracy"],
+            -abs(best_result["decision_threshold"] - 0.5),
+        ):
+            best_result = result
 
-    if valid_folds < 2:
+    if best_result is None:
         return {
+            "pipeline": build_random_forest_classifier_pipeline(),
+            "tuned_params": {
+                "n_estimators": 400,
+                "max_depth": 6,
+                "min_samples_leaf": 5,
+            },
             "decision_threshold": 0.5,
             "threshold_source": "default",
-            "cv_folds": valid_folds,
+            "cv_folds": 0,
             "cv_accuracy": None,
             "cv_balanced_accuracy": None,
             "cv_roc_auc": None,
+            "hyperparameter_source": "default",
         }
 
-    cv_probabilities = np.concatenate(oof_probabilities)
-    cv_targets = np.concatenate(oof_targets)
-    threshold_result = choose_best_threshold(cv_targets, cv_probabilities)
-    cv_roc_auc = (
-        float(roc_auc_score(cv_targets, cv_probabilities))
-        if len(np.unique(cv_targets)) > 1
-        else None
-    )
-
+    best_pipeline = build_random_forest_classifier_pipeline(**best_result["tuned_params"])
+    best_pipeline.fit(X_train, y_train)
     return {
-        "decision_threshold": threshold_result["decision_threshold"],
-        "threshold_source": "time_series_cv",
-        "cv_folds": valid_folds,
-        "cv_accuracy": threshold_result["accuracy"],
-        "cv_balanced_accuracy": threshold_result["balanced_accuracy"],
-        "cv_roc_auc": cv_roc_auc,
+        "pipeline": best_pipeline,
+        **best_result,
     }
 
 
@@ -1394,49 +1475,20 @@ def train_models(config: PipelineConfig, paths: PipelinePaths) -> dict[str, Any]
         "random_forest": {
             "features": extended_feature_columns,
             "threshold_mode": "fixed",
-            "pipeline": Pipeline(
-                [
-                    ("imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
-                    (
-                        "model",
-                        RandomForestClassifier(
-                            n_estimators=400,
-                            max_depth=6,
-                            min_samples_leaf=5,
-                            class_weight="balanced",
-                            random_state=42,
-                        ),
-                    ),
-                ]
-            ),
+            "pipeline": build_random_forest_classifier_pipeline(),
         },
         "random_forest_tuned": {
             "features": extended_feature_columns,
-            "threshold_mode": "time_series_cv",
-            "pipeline": Pipeline(
-                [
-                    ("imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
-                    (
-                        "model",
-                        RandomForestClassifier(
-                            n_estimators=400,
-                            max_depth=6,
-                            min_samples_leaf=5,
-                            class_weight="balanced",
-                            random_state=42,
-                        ),
-                    ),
-                ]
-            ),
+            "hyperparameter_mode": "time_series_cv",
         },
         "rf_simple_baseline": {
             "features": simple_rf_feature_columns,
             "threshold_mode": "fixed",
-            "pipeline": Pipeline(
-                [
-                    ("imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
-                    ("model", RandomForestClassifier(n_estimators=200, max_depth=6, random_state=42)),
-                ]
+            "pipeline": build_random_forest_classifier_pipeline(
+                n_estimators=200,
+                max_depth=6,
+                min_samples_leaf=1,
+                class_weight=None,
             ),
         },
         "hist_gradient_boosting": {
@@ -1462,15 +1514,21 @@ def train_models(config: PipelineConfig, paths: PipelinePaths) -> dict[str, Any]
     classification_results: list[dict[str, Any]] = []
     for name, candidate in classification_candidates.items():
         candidate_features = candidate["features"]
-        model = candidate["pipeline"]
         threshold_details = {"decision_threshold": 0.5, "threshold_source": "fixed"}
-        if candidate.get("threshold_mode") == "time_series_cv":
-            threshold_details = tune_threshold_with_time_series_cv(
-                model,
+        tuning_details: dict[str, Any] = {}
+        if candidate.get("hyperparameter_mode") == "time_series_cv":
+            tuning_details = tune_random_forest_with_time_series_cv(
                 train_df[candidate_features],
                 y_train,
             )
-        model.fit(train_df[candidate_features], y_train)
+            model = tuning_details["pipeline"]
+            threshold_details = {
+                "decision_threshold": tuning_details["decision_threshold"],
+                "threshold_source": tuning_details["threshold_source"],
+            }
+        else:
+            model = candidate["pipeline"]
+            model.fit(train_df[candidate_features], y_train)
         probabilities = positive_class_probabilities(model, test_df[candidate_features])
         predictions = (probabilities >= threshold_details["decision_threshold"]).astype(int)
         classification_results.append(
@@ -1482,14 +1540,38 @@ def train_models(config: PipelineConfig, paths: PipelinePaths) -> dict[str, Any]
                 "latest_up_probability": float(positive_class_probabilities(model, latest_features[candidate_features])[0]),
                 "feature_count": len(candidate_features),
                 **threshold_details,
+                **{
+                    key: value
+                    for key, value in tuning_details.items()
+                    if key
+                    not in {
+                        "pipeline",
+                        "decision_threshold",
+                        "threshold_source",
+                    }
+                },
             }
         )
 
     best_classification = select_best_model(classification_results, ["balanced_accuracy", "roc_auc"])
     direction_candidate = classification_candidates[best_classification["name"]]
-    direction_model = direction_candidate["pipeline"]
     direction_feature_columns = direction_candidate["features"]
-    direction_model.fit(training_data[direction_feature_columns], training_data["target_up"])
+    if direction_candidate.get("hyperparameter_mode") == "time_series_cv":
+        tuned_result = tune_random_forest_with_time_series_cv(
+            training_data[direction_feature_columns],
+            training_data["target_up"],
+        )
+        direction_model = tuned_result["pipeline"]
+        best_classification.update(
+            {
+                key: value
+                for key, value in tuned_result.items()
+                if key not in {"pipeline"}
+            }
+        )
+    else:
+        direction_model = direction_candidate["pipeline"]
+        direction_model.fit(training_data[direction_feature_columns], training_data["target_up"])
     regression_feature_columns = extended_feature_columns
 
     regression_candidates = {
@@ -1768,6 +1850,15 @@ def write_report(config: PipelineConfig, paths: PipelinePaths) -> Path:
             f" roc_auc `{item['roc_auc']:.4f}` |"
             f" 阈值 `{item.get('decision_threshold', 0.5):.2f}` |"
             f" 特征数 `{item.get('feature_count', 0)}`"
+            + (
+                " | 参数 `"
+                + ", ".join(
+                    f"{key}={value}" for key, value in item.get("tuned_params", {}).items()
+                )
+                + "`"
+                if item.get("tuned_params")
+                else ""
+            )
         )
         for item in classification_candidates
     ]
@@ -1812,8 +1903,12 @@ def write_report(config: PipelineConfig, paths: PipelinePaths) -> Path:
             rf_threshold_read = (
                 f"对扩展特征随机森林做 TimeSeriesSplit 阈值调优后，balanced accuracy 从 "
                 f"`{random_forest_candidate['balanced_accuracy']:.4f}` 提高到 "
-                f"`{random_forest_tuned_candidate['balanced_accuracy']:.4f}`，说明它不完全是模型本身无效，"
-                f"阈值确实影响了方向判断。"
+                f"`{random_forest_tuned_candidate['balanced_accuracy']:.4f}`。"
+                f" 最优组合是 `n_estimators={random_forest_tuned_candidate['tuned_params']['n_estimators']}`, "
+                f"`max_depth={random_forest_tuned_candidate['tuned_params']['max_depth']}`, "
+                f"`min_samples_leaf={random_forest_tuned_candidate['tuned_params']['min_samples_leaf']}`, "
+                f"阈值调到 `{random_forest_tuned_candidate['decision_threshold']:.2f}`，说明它不完全是模型本身无效，"
+                f"阈值和树参数都影响了方向判断。"
             )
         elif random_forest_tuned_candidate["balanced_accuracy"] == random_forest_candidate["balanced_accuracy"]:
             rf_threshold_read = (
@@ -1823,8 +1918,11 @@ def write_report(config: PipelineConfig, paths: PipelinePaths) -> Path:
             rf_threshold_read = (
                 f"对扩展特征随机森林做 TimeSeriesSplit 阈值调优后，balanced accuracy 从 "
                 f"`{random_forest_candidate['balanced_accuracy']:.4f}` 变为 "
-                f"`{random_forest_tuned_candidate['balanced_accuracy']:.4f}`，没有变好，"
-                "说明当前随机森林的主要问题不只是 `0.5` 阈值。"
+                f"`{random_forest_tuned_candidate['balanced_accuracy']:.4f}`，没有变好。"
+                f" 最优组合是 `n_estimators={random_forest_tuned_candidate['tuned_params']['n_estimators']}`, "
+                f"`max_depth={random_forest_tuned_candidate['tuned_params']['max_depth']}`, "
+                f"`min_samples_leaf={random_forest_tuned_candidate['tuned_params']['min_samples_leaf']}`, "
+                f"阈值 `{random_forest_tuned_candidate['decision_threshold']:.2f}`，说明当前随机森林的主要问题不只是 `0.5` 阈值。"
             )
     else:
         rf_threshold_read = "这次没有成功产出随机森林阈值调优结果。"
