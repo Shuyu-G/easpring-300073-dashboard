@@ -65,6 +65,13 @@ GOLD_STYLE_RF_FEATURES = [
     "news_sentiment_mean",
     "news_count",
 ]
+RANDOM_FOREST_SELECTED_FEATURE_LIMIT = 15
+RANDOM_FOREST_CORRELATION_THRESHOLD = 0.92
+RANDOM_FOREST_SELECTION_PARAMS = {
+    "n_estimators": 300,
+    "max_depth": 6,
+    "min_samples_leaf": 3,
+}
 RANDOM_FOREST_TUNING_GRID = [
     {
         "n_estimators": n_estimators,
@@ -1232,7 +1239,11 @@ def select_best_model(results: list[dict[str, Any]], sort_keys: list[str], desce
     return sorted_results[0]
 
 
-def extract_feature_importance(fitted_model: Pipeline, feature_columns: list[str]) -> list[dict[str, Any]]:
+def extract_feature_importance(
+    fitted_model: Pipeline,
+    feature_columns: list[str],
+    top_n: int = 12,
+) -> list[dict[str, Any]]:
     model = fitted_model.named_steps["model"]
     if hasattr(model, "feature_importances_"):
         values = model.feature_importances_
@@ -1246,7 +1257,7 @@ def extract_feature_importance(fitted_model: Pipeline, feature_columns: list[str
     importance = importance.sort_values("abs_importance", ascending=False)
     return [
         {"feature": row.feature, "importance": float(row.importance)}
-        for row in importance.head(12).itertuples()
+        for row in importance.head(top_n).itertuples()
     ]
 
 
@@ -1316,6 +1327,59 @@ def choose_best_threshold(targets: np.ndarray, probabilities: np.ndarray) -> dic
             best_result = result
 
     return best_result or {"decision_threshold": 0.5, "accuracy": 0.0, "balanced_accuracy": 0.0}
+
+
+def select_random_forest_feature_subset(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    feature_columns: list[str],
+    *,
+    max_features: int = RANDOM_FOREST_SELECTED_FEATURE_LIMIT,
+    correlation_threshold: float = RANDOM_FOREST_CORRELATION_THRESHOLD,
+) -> list[str]:
+    if len(feature_columns) <= max_features:
+        return list(feature_columns)
+
+    usable_features = [
+        column
+        for column in feature_columns
+        if X_train[column].dropna().nunique() > 1
+    ]
+    if not usable_features:
+        return list(feature_columns[:max_features])
+
+    selector = build_random_forest_classifier_pipeline(**RANDOM_FOREST_SELECTION_PARAMS)
+    selector.fit(X_train[usable_features], y_train)
+    ranked_features = [
+        item["feature"]
+        for item in extract_feature_importance(selector, usable_features, top_n=len(usable_features))
+    ]
+
+    transformed = selector.named_steps["imputer"].transform(X_train[usable_features])
+    transformed_frame = pd.DataFrame(transformed, columns=usable_features, index=X_train.index)
+
+    selected_features: list[str] = []
+    for feature in ranked_features:
+        if len(selected_features) >= max_features:
+            break
+        if not selected_features:
+            selected_features.append(feature)
+            continue
+
+        pairwise_correlation = (
+            transformed_frame[selected_features + [feature]]
+            .corr()
+            .abs()[feature]
+            .drop(labels=[feature])
+            .fillna(0.0)
+        )
+        if pairwise_correlation.empty or float(pairwise_correlation.max()) < correlation_threshold:
+            selected_features.append(feature)
+
+    if not selected_features:
+        return list(ranked_features[:max_features])
+
+    return selected_features
 
 
 def tune_random_forest_with_time_series_cv(
@@ -1460,6 +1524,11 @@ def train_models(config: PipelineConfig, paths: PipelinePaths) -> dict[str, Any]
     test_df = training_data.iloc[train_size:].copy()
     y_train = train_df["target_up"]
     y_test = test_df["target_up"]
+    selected_rf_feature_columns = select_random_forest_feature_subset(
+        train_df[extended_feature_columns],
+        y_train,
+        extended_feature_columns,
+    )
 
     classification_candidates = {
         "logistic": {
@@ -1474,6 +1543,11 @@ def train_models(config: PipelineConfig, paths: PipelinePaths) -> dict[str, Any]
         },
         "random_forest": {
             "features": extended_feature_columns,
+            "threshold_mode": "fixed",
+            "pipeline": build_random_forest_classifier_pipeline(),
+        },
+        "random_forest_selected": {
+            "features": selected_rf_feature_columns,
             "threshold_mode": "fixed",
             "pipeline": build_random_forest_classifier_pipeline(),
         },
@@ -1735,6 +1809,7 @@ def train_models(config: PipelineConfig, paths: PipelinePaths) -> dict[str, Any]
             "feature_importance": extract_feature_importance(direction_model, direction_feature_columns),
             "feature_sets": {
                 "extended": extended_feature_columns,
+                "random_forest_selected": selected_rf_feature_columns,
                 "rf_simple_baseline": simple_rf_feature_columns,
             },
         },
@@ -1833,9 +1908,15 @@ def write_report(config: PipelineConfig, paths: PipelinePaths) -> Path:
         (item for item in classification_candidates if item["name"] == "rf_simple_baseline"),
         None,
     )
+    random_forest_selected_candidate = next(
+        (item for item in classification_candidates if item["name"] == "random_forest_selected"),
+        None,
+    )
+    selected_rf_feature_set = metrics["classification"]["feature_sets"].get("random_forest_selected", [])
     model_display_names = {
         "logistic": "Logistic Regression",
         "random_forest": "Random Forest",
+        "random_forest_selected": "Random Forest (筛选后特征)",
         "random_forest_tuned": "Random Forest (TimeSeriesSplit 调阈值)",
         "rf_simple_baseline": "Random Forest (简化基线)",
         "hist_gradient_boosting": "Hist Gradient Boosting",
@@ -1897,6 +1978,31 @@ def write_report(config: PipelineConfig, paths: PipelinePaths) -> Path:
         simple_rf_read = (
             "黄金项目风格的简化随机森林基线能作为对照，但当前还是扩展特征模型更强一些，说明财务和多源新闻统计仍然提供了补充信息。"
         )
+
+    if random_forest_candidate and random_forest_selected_candidate:
+        selected_feature_preview = "、".join(selected_rf_feature_set[:8]) if selected_rf_feature_set else "未写出"
+        if random_forest_selected_candidate["balanced_accuracy"] > random_forest_candidate["balanced_accuracy"]:
+            rf_selected_read = (
+                f"先对扩展特征做一次训练集内筛选后，随机森林的 balanced accuracy 从 "
+                f"`{random_forest_candidate['balanced_accuracy']:.4f}` 提高到 "
+                f"`{random_forest_selected_candidate['balanced_accuracy']:.4f}`，"
+                f"说明全量特征里确实有一部分噪音或强相关变量在拖累树模型。"
+                f" 这次保留下来的代表性特征包括 `{selected_feature_preview}`。"
+            )
+        elif random_forest_selected_candidate["balanced_accuracy"] == random_forest_candidate["balanced_accuracy"]:
+            rf_selected_read = (
+                "先做特征筛选后，随机森林的 balanced accuracy 没有变化，说明当前主要问题不只是特征太多。"
+            )
+        else:
+            rf_selected_read = (
+                f"先做特征筛选后，随机森林的 balanced accuracy 从 "
+                f"`{random_forest_candidate['balanced_accuracy']:.4f}` 变为 "
+                f"`{random_forest_selected_candidate['balanced_accuracy']:.4f}`，没有提升。"
+                f" 这说明当前信号偏弱的问题并不能只靠删特征解决。"
+                f" 这次留下的主要特征包括 `{selected_feature_preview}`。"
+            )
+    else:
+        rf_selected_read = "这次没有成功产出筛选后特征的随机森林结果。"
 
     if random_forest_candidate and random_forest_tuned_candidate:
         if random_forest_tuned_candidate["balanced_accuracy"] > random_forest_candidate["balanced_accuracy"]:
@@ -1989,6 +2095,7 @@ def write_report(config: PipelineConfig, paths: PipelinePaths) -> Path:
 解释:
 
 - {classifier_read}
+- {rf_selected_read}
 - {rf_threshold_read}
 - {simple_rf_read}
 - 回归模型的 `R²` 仍为负值，说明它对下一日精确收益率的解释力不足。
