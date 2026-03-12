@@ -952,6 +952,8 @@ def build_javascript() -> str:
         };
 
         const WINDOW_OPTIONS = {
+          "1W": 5,
+          "1M": 21,
           "3M": 63,
           "6M": 126,
           "1Y": 252,
@@ -2251,6 +2253,8 @@ def build_index_page() -> str:
                 <p class="panel-subtitle" data-i18n="home.price.subtitle">保留本地版的窗口切换，观察价格、量能和相对强弱。</p>
                 <div class="controls">
                   <div class="button-group">
+                    <button class="button" data-window="1W">1W</button>
+                    <button class="button" data-window="1M">1M</button>
                     <button class="button" data-window="3M">3M</button>
                     <button class="button" data-window="6M">6M</button>
                     <button class="button active" data-window="1Y">1Y</button>
