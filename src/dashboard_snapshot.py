@@ -1011,6 +1011,7 @@ def build_javascript() -> str:
             "common.allSources": "全部来源",
             "common.allImpacts": "全部方向",
             "common.accuracy": "Accuracy",
+            "common.balancedAccuracy": "Balanced Accuracy",
             "common.rocAuc": "ROC AUC",
             "impact.positive": "偏利多",
             "impact.neutral": "中性",
@@ -1091,6 +1092,7 @@ def build_javascript() -> str:
             "chart.roe": "ROE",
             "modelName.logistic": "Logistic Regression",
             "modelName.random_forest": "Random Forest",
+            "modelName.random_forest_tuned": "随机森林(时序调阈值)",
             "modelName.rf_simple_baseline": "随机森林(简化基线)",
             "modelName.hist_gradient_boosting": "Hist Gradient Boosting",
             "modelName.ridge": "Ridge Regression",
@@ -1142,6 +1144,7 @@ def build_javascript() -> str:
             "common.allSources": "All sources",
             "common.allImpacts": "All impacts",
             "common.accuracy": "Accuracy",
+            "common.balancedAccuracy": "Balanced Accuracy",
             "common.rocAuc": "ROC AUC",
             "impact.positive": "Positive",
             "impact.neutral": "Neutral",
@@ -1222,6 +1225,7 @@ def build_javascript() -> str:
             "chart.roe": "ROE",
             "modelName.logistic": "Logistic Regression",
             "modelName.random_forest": "Random Forest",
+            "modelName.random_forest_tuned": "Random Forest (time-series threshold tuning)",
             "modelName.rf_simple_baseline": "Random Forest (simple baseline)",
             "modelName.hist_gradient_boosting": "Hist Gradient Boosting",
             "modelName.ridge": "Ridge Regression",
@@ -1273,6 +1277,7 @@ def build_javascript() -> str:
             "common.allSources": "Alle Quellen",
             "common.allImpacts": "Alle Richtungen",
             "common.accuracy": "Accuracy",
+            "common.balancedAccuracy": "Balanced Accuracy",
             "common.rocAuc": "ROC AUC",
             "impact.positive": "Positiv",
             "impact.neutral": "Neutral",
@@ -1353,6 +1358,7 @@ def build_javascript() -> str:
             "chart.roe": "ROE",
             "modelName.logistic": "Logistische Regression",
             "modelName.random_forest": "Random Forest",
+            "modelName.random_forest_tuned": "Random Forest (Schwellenwert mit TimeSeriesSplit)",
             "modelName.rf_simple_baseline": "Random Forest (einfache Basislinie)",
             "modelName.hist_gradient_boosting": "Histogram Gradient Boosting",
             "modelName.ridge": "Ridge-Regression",
@@ -1947,6 +1953,13 @@ def build_javascript() -> str:
                 },
                 {
                   x: candidates.map((item) => modelLabel(item.model_name || item.model || item.name || "model")),
+                  y: candidates.map((item) => item.balanced_accuracy ?? 0),
+                  type: "bar",
+                  name: t("common.balancedAccuracy"),
+                  marker: { color: "#8b6f47" },
+                },
+                {
+                  x: candidates.map((item) => modelLabel(item.model_name || item.model || item.name || "model")),
                   y: candidates.map((item) => item.roc_auc ?? 0),
                   type: "bar",
                   name: t("common.rocAuc"),
@@ -2010,7 +2023,7 @@ def build_javascript() -> str:
                 <div class="panel metric-card ${toneClass((cls.selected_metrics.accuracy ?? 0) - (cls.baseline_accuracy ?? 0))}">
                   <div class="metric-label">${escapeHtml(t("model.summary.classification"))}</div>
                   <div class="metric-value">${escapeHtml(modelLabel(cls.selected_model))}</div>
-                  <div class="metric-detail">${escapeHtml(t("common.accuracy"))} ${formatPercent(cls.selected_metrics.accuracy)} | ${escapeHtml(t("common.rocAuc"))} ${formatPercent(cls.selected_metrics.roc_auc)}</div>
+                  <div class="metric-detail">${escapeHtml(t("common.accuracy"))} ${formatPercent(cls.selected_metrics.accuracy)} | ${escapeHtml(t("common.balancedAccuracy"))} ${formatPercent(cls.selected_metrics.balanced_accuracy)} | ${escapeHtml(t("common.rocAuc"))} ${formatPercent(cls.selected_metrics.roc_auc)}</div>
                 </div>
                 <div class="panel metric-card ${toneClass(reg.selected_metrics.r2 ?? 0)}">
                   <div class="metric-label">${escapeHtml(t("model.summary.regression"))}</div>

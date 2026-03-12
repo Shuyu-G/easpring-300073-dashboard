@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import io
 import json
 import math
+import numpy as np
 import re
 import time as time_module
 import urllib.parse
@@ -41,6 +42,8 @@ from sklearn.metrics import (
     r2_score,
     roc_auc_score,
 )
+from sklearn.base import clone
+from sklearn.model_selection import TimeSeriesSplit
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -1238,6 +1241,125 @@ def extract_feature_importance(fitted_model: Pipeline, feature_columns: list[str
     ]
 
 
+def positive_class_probabilities(fitted_model: Pipeline, frame: pd.DataFrame) -> np.ndarray:
+    probabilities = fitted_model.predict_proba(frame)
+    classes = getattr(fitted_model, "classes_", None)
+    if classes is None and hasattr(fitted_model, "named_steps"):
+        classes = getattr(fitted_model.named_steps.get("model"), "classes_", None)
+
+    if probabilities.ndim == 1:
+        return probabilities.astype(float)
+    if probabilities.shape[1] == 1:
+        if classes is not None and len(classes) == 1 and int(classes[0]) == 1:
+            return np.ones(len(frame), dtype=float)
+        return np.zeros(len(frame), dtype=float)
+    if classes is not None and 1 in list(classes):
+        return probabilities[:, list(classes).index(1)].astype(float)
+    return probabilities[:, -1].astype(float)
+
+
+def choose_best_threshold(targets: np.ndarray, probabilities: np.ndarray) -> dict[str, float]:
+    best_result: dict[str, float] | None = None
+    candidate_thresholds = np.round(np.arange(0.30, 0.701, 0.01), 2)
+
+    for threshold in candidate_thresholds:
+        predictions = (probabilities >= threshold).astype(int)
+        result = {
+            "decision_threshold": float(threshold),
+            "accuracy": float(accuracy_score(targets, predictions)),
+            "balanced_accuracy": float(balanced_accuracy_score(targets, predictions)),
+        }
+        rank = (
+            result["balanced_accuracy"],
+            result["accuracy"],
+            -abs(float(threshold) - 0.5),
+        )
+        if best_result is None or rank > (
+            best_result["balanced_accuracy"],
+            best_result["accuracy"],
+            -abs(best_result["decision_threshold"] - 0.5),
+        ):
+            best_result = result
+
+    return best_result or {"decision_threshold": 0.5, "accuracy": 0.0, "balanced_accuracy": 0.0}
+
+
+def tune_threshold_with_time_series_cv(
+    candidate_pipeline: Pipeline,
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    n_splits: int = 5,
+) -> dict[str, Any]:
+    if len(X_train) < 80 or y_train.nunique() < 2:
+        return {
+            "decision_threshold": 0.5,
+            "threshold_source": "default",
+            "cv_folds": 0,
+            "cv_accuracy": None,
+            "cv_balanced_accuracy": None,
+            "cv_roc_auc": None,
+        }
+
+    max_splits = min(n_splits, len(X_train) - 1)
+    if max_splits < 2:
+        return {
+            "decision_threshold": 0.5,
+            "threshold_source": "default",
+            "cv_folds": 0,
+            "cv_accuracy": None,
+            "cv_balanced_accuracy": None,
+            "cv_roc_auc": None,
+        }
+
+    splitter = TimeSeriesSplit(n_splits=max_splits)
+    oof_probabilities: list[np.ndarray] = []
+    oof_targets: list[np.ndarray] = []
+    valid_folds = 0
+
+    for fold_train_idx, fold_valid_idx in splitter.split(X_train):
+        fold_X_train = X_train.iloc[fold_train_idx]
+        fold_y_train = y_train.iloc[fold_train_idx]
+        fold_X_valid = X_train.iloc[fold_valid_idx]
+        fold_y_valid = y_train.iloc[fold_valid_idx]
+        if fold_X_train.empty or fold_X_valid.empty:
+            continue
+
+        fold_model = clone(candidate_pipeline)
+        fold_model.fit(fold_X_train, fold_y_train)
+        fold_probabilities = positive_class_probabilities(fold_model, fold_X_valid)
+        oof_probabilities.append(fold_probabilities)
+        oof_targets.append(fold_y_valid.to_numpy())
+        valid_folds += 1
+
+    if valid_folds < 2:
+        return {
+            "decision_threshold": 0.5,
+            "threshold_source": "default",
+            "cv_folds": valid_folds,
+            "cv_accuracy": None,
+            "cv_balanced_accuracy": None,
+            "cv_roc_auc": None,
+        }
+
+    cv_probabilities = np.concatenate(oof_probabilities)
+    cv_targets = np.concatenate(oof_targets)
+    threshold_result = choose_best_threshold(cv_targets, cv_probabilities)
+    cv_roc_auc = (
+        float(roc_auc_score(cv_targets, cv_probabilities))
+        if len(np.unique(cv_targets)) > 1
+        else None
+    )
+
+    return {
+        "decision_threshold": threshold_result["decision_threshold"],
+        "threshold_source": "time_series_cv",
+        "cv_folds": valid_folds,
+        "cv_accuracy": threshold_result["accuracy"],
+        "cv_balanced_accuracy": threshold_result["balanced_accuracy"],
+        "cv_roc_auc": cv_roc_auc,
+    }
+
+
 def train_models(config: PipelineConfig, paths: PipelinePaths) -> dict[str, Any]:
     training_data = pd.read_csv(paths.training_data_csv, parse_dates=["date"])
     latest_features = pd.read_csv(paths.latest_features_csv, parse_dates=["date"])
@@ -1271,6 +1393,26 @@ def train_models(config: PipelineConfig, paths: PipelinePaths) -> dict[str, Any]
         },
         "random_forest": {
             "features": extended_feature_columns,
+            "threshold_mode": "fixed",
+            "pipeline": Pipeline(
+                [
+                    ("imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
+                    (
+                        "model",
+                        RandomForestClassifier(
+                            n_estimators=400,
+                            max_depth=6,
+                            min_samples_leaf=5,
+                            class_weight="balanced",
+                            random_state=42,
+                        ),
+                    ),
+                ]
+            ),
+        },
+        "random_forest_tuned": {
+            "features": extended_feature_columns,
+            "threshold_mode": "time_series_cv",
             "pipeline": Pipeline(
                 [
                     ("imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
@@ -1289,6 +1431,7 @@ def train_models(config: PipelineConfig, paths: PipelinePaths) -> dict[str, Any]
         },
         "rf_simple_baseline": {
             "features": simple_rf_feature_columns,
+            "threshold_mode": "fixed",
             "pipeline": Pipeline(
                 [
                     ("imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
@@ -1298,6 +1441,7 @@ def train_models(config: PipelineConfig, paths: PipelinePaths) -> dict[str, Any]
         },
         "hist_gradient_boosting": {
             "features": extended_feature_columns,
+            "threshold_mode": "fixed",
             "pipeline": Pipeline(
                 [
                     ("imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
@@ -1319,17 +1463,25 @@ def train_models(config: PipelineConfig, paths: PipelinePaths) -> dict[str, Any]
     for name, candidate in classification_candidates.items():
         candidate_features = candidate["features"]
         model = candidate["pipeline"]
+        threshold_details = {"decision_threshold": 0.5, "threshold_source": "fixed"}
+        if candidate.get("threshold_mode") == "time_series_cv":
+            threshold_details = tune_threshold_with_time_series_cv(
+                model,
+                train_df[candidate_features],
+                y_train,
+            )
         model.fit(train_df[candidate_features], y_train)
-        probabilities = model.predict_proba(test_df[candidate_features])[:, 1]
-        predictions = (probabilities >= 0.5).astype(int)
+        probabilities = positive_class_probabilities(model, test_df[candidate_features])
+        predictions = (probabilities >= threshold_details["decision_threshold"]).astype(int)
         classification_results.append(
             {
                 "name": name,
                 "accuracy": float(accuracy_score(y_test, predictions)),
                 "balanced_accuracy": float(balanced_accuracy_score(y_test, predictions)),
                 "roc_auc": float(roc_auc_score(y_test, probabilities)),
-                "latest_up_probability": float(model.predict_proba(latest_features[candidate_features])[:, 1][0]),
+                "latest_up_probability": float(positive_class_probabilities(model, latest_features[candidate_features])[0]),
                 "feature_count": len(candidate_features),
+                **threshold_details,
             }
         )
 
@@ -1393,7 +1545,7 @@ def train_models(config: PipelineConfig, paths: PipelinePaths) -> dict[str, Any]
     ridge_intercept = ridge_equation_model.named_steps["model"].intercept_
 
     next_session_date = (latest_features["date"].iloc[0] + pd.offsets.BDay(1)).strftime("%Y-%m-%d")
-    latest_up_probability = float(direction_model.predict_proba(latest_features[direction_feature_columns])[:, 1][0])
+    latest_up_probability = float(positive_class_probabilities(direction_model, latest_features[direction_feature_columns])[0])
     latest_predicted_return = float(return_model.predict(latest_features[regression_feature_columns])[0])
 
     if latest_up_probability >= 0.6 and latest_predicted_return > 0.005:
@@ -1602,6 +1754,7 @@ def write_report(config: PipelineConfig, paths: PipelinePaths) -> Path:
     model_display_names = {
         "logistic": "Logistic Regression",
         "random_forest": "Random Forest",
+        "random_forest_tuned": "Random Forest (TimeSeriesSplit 调阈值)",
         "rf_simple_baseline": "Random Forest (简化基线)",
         "hist_gradient_boosting": "Hist Gradient Boosting",
         "ridge": "Ridge Regression",
@@ -1613,10 +1766,19 @@ def write_report(config: PipelineConfig, paths: PipelinePaths) -> Path:
             f" accuracy `{item['accuracy']:.4f}` |"
             f" balanced_accuracy `{item['balanced_accuracy']:.4f}` |"
             f" roc_auc `{item['roc_auc']:.4f}` |"
+            f" 阈值 `{item.get('decision_threshold', 0.5):.2f}` |"
             f" 特征数 `{item.get('feature_count', 0)}`"
         )
         for item in classification_candidates
     ]
+    random_forest_candidate = next(
+        (item for item in classification_candidates if item["name"] == "random_forest"),
+        None,
+    )
+    random_forest_tuned_candidate = next(
+        (item for item in classification_candidates if item["name"] == "random_forest_tuned"),
+        None,
+    )
 
     if classifier_metrics["accuracy"] > baseline_accuracy:
         classifier_read = "分类模型在 plain accuracy 上略高于简单多数基线，但优势仍然很弱。"
@@ -1644,6 +1806,28 @@ def write_report(config: PipelineConfig, paths: PipelinePaths) -> Path:
         simple_rf_read = (
             "黄金项目风格的简化随机森林基线能作为对照，但当前还是扩展特征模型更强一些，说明财务和多源新闻统计仍然提供了补充信息。"
         )
+
+    if random_forest_candidate and random_forest_tuned_candidate:
+        if random_forest_tuned_candidate["balanced_accuracy"] > random_forest_candidate["balanced_accuracy"]:
+            rf_threshold_read = (
+                f"对扩展特征随机森林做 TimeSeriesSplit 阈值调优后，balanced accuracy 从 "
+                f"`{random_forest_candidate['balanced_accuracy']:.4f}` 提高到 "
+                f"`{random_forest_tuned_candidate['balanced_accuracy']:.4f}`，说明它不完全是模型本身无效，"
+                f"阈值确实影响了方向判断。"
+            )
+        elif random_forest_tuned_candidate["balanced_accuracy"] == random_forest_candidate["balanced_accuracy"]:
+            rf_threshold_read = (
+                "对扩展特征随机森林做 TimeSeriesSplit 阈值调优后，balanced accuracy 没有变化，说明问题不只是 `0.5` 阈值。"
+            )
+        else:
+            rf_threshold_read = (
+                f"对扩展特征随机森林做 TimeSeriesSplit 阈值调优后，balanced accuracy 从 "
+                f"`{random_forest_candidate['balanced_accuracy']:.4f}` 变为 "
+                f"`{random_forest_tuned_candidate['balanced_accuracy']:.4f}`，没有变好，"
+                "说明当前随机森林的主要问题不只是 `0.5` 阈值。"
+            )
+    else:
+        rf_threshold_read = "这次没有成功产出随机森林阈值调优结果。"
 
     report = f"""# 当升科技(300073) 两年新闻与股价 ETL + ML 分析
 
@@ -1707,6 +1891,7 @@ def write_report(config: PipelineConfig, paths: PipelinePaths) -> Path:
 解释:
 
 - {classifier_read}
+- {rf_threshold_read}
 - {simple_rf_read}
 - 回归模型的 `R²` 仍为负值，说明它对下一日精确收益率的解释力不足。
 - 所以这套结果更适合用来做**辅助观察**，不适合单独作为买卖依据。
