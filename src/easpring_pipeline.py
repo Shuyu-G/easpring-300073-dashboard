@@ -54,6 +54,15 @@ GOOGLE_NEWS_QUERIES = [
 GOOGLE_NEWS_ENDPOINT = "https://news.google.com/rss/search"
 REQUEST_HEADERS = {"User-Agent": "Mozilla/5.0"}
 COMPANY_KEYWORDS = ["当升科技", "北京当升材料科技股份有限公司"]
+GOLD_STYLE_RF_FEATURES = [
+    "open",
+    "high",
+    "low",
+    "close",
+    "daily_return",
+    "news_sentiment_mean",
+    "news_count",
+]
 DISCLOSURE_INCLUDE_KEYWORDS = [
     "年报",
     "年度报告",
@@ -1070,6 +1079,7 @@ def build_training_dataset(config: PipelineConfig, paths: PipelinePaths) -> dict
     features["ret_1d"] = features["close"].pct_change()
     features["ret_3d"] = features["close"].pct_change(3)
     features["ret_5d"] = features["close"].pct_change(5)
+    features["daily_return"] = features["ret_1d"]
     features["ma_5"] = features["close"].rolling(5).mean()
     features["ma_10"] = features["close"].rolling(10).mean()
     features["ma_20"] = features["close"].rolling(20).mean()
@@ -1129,7 +1139,7 @@ def build_training_dataset(config: PipelineConfig, paths: PipelinePaths) -> dict
     features["next_return"] = features["close"].shift(-1) / features["close"] - 1
     features["target_up"] = (features["next_return"] > 0).astype(int)
 
-    feature_columns = [
+    extended_feature_columns = [
         "close",
         "volume",
         "amount",
@@ -1178,6 +1188,7 @@ def build_training_dataset(config: PipelineConfig, paths: PipelinePaths) -> dict
         "research_count_20d",
         "web_news_count_5d",
     ]
+    feature_columns = list(dict.fromkeys(GOLD_STYLE_RF_FEATURES + extended_feature_columns))
 
     latest_features = features.iloc[[-1]][["date"] + feature_columns].copy()
     training_data = features.dropna(subset=["next_return"]).copy()
@@ -1190,6 +1201,8 @@ def build_training_dataset(config: PipelineConfig, paths: PipelinePaths) -> dict
 
     return {
         "feature_columns": feature_columns,
+        "extended_feature_columns": extended_feature_columns,
+        "simple_rf_feature_columns": GOLD_STYLE_RF_FEATURES,
         "price_rows": len(prices),
         "news_items": len(company_news),
         "news_days": int((daily_news["news_count"] > 0).sum()) if "news_count" in daily_news.columns else 0,
@@ -1236,58 +1249,78 @@ def train_models(config: PipelineConfig, paths: PipelinePaths) -> dict[str, Any]
     google_news = pd.read_csv(paths.google_news_csv)
     pdf_cache = pd.read_csv(paths.pdf_text_cache_csv) if paths.pdf_text_cache_csv.exists() else pd.DataFrame()
     feature_columns = [column for column in training_data.columns if column not in {"date", "target_up", "next_return"}]
+    extended_feature_columns = [column for column in feature_columns if column not in {"open", "high", "low", "daily_return"}]
+    simple_rf_feature_columns = [column for column in GOLD_STYLE_RF_FEATURES if column in feature_columns]
 
     train_size = int(len(training_data) * 0.8)
     train_df = training_data.iloc[:train_size].copy()
     test_df = training_data.iloc[train_size:].copy()
-    X_train = train_df[feature_columns]
-    X_test = test_df[feature_columns]
     y_train = train_df["target_up"]
     y_test = test_df["target_up"]
 
     classification_candidates = {
-        "logistic": Pipeline(
-            [
-                ("imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
-                ("scaler", StandardScaler()),
-                ("model", LogisticRegression(max_iter=2000, class_weight="balanced", random_state=42)),
-            ]
-        ),
-        "random_forest": Pipeline(
-            [
-                ("imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
-                (
-                    "model",
-                    RandomForestClassifier(
-                        n_estimators=400,
-                        max_depth=6,
-                        min_samples_leaf=5,
-                        class_weight="balanced",
-                        random_state=42,
+        "logistic": {
+            "features": extended_feature_columns,
+            "pipeline": Pipeline(
+                [
+                    ("imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
+                    ("scaler", StandardScaler()),
+                    ("model", LogisticRegression(max_iter=2000, class_weight="balanced", random_state=42)),
+                ]
+            ),
+        },
+        "random_forest": {
+            "features": extended_feature_columns,
+            "pipeline": Pipeline(
+                [
+                    ("imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
+                    (
+                        "model",
+                        RandomForestClassifier(
+                            n_estimators=400,
+                            max_depth=6,
+                            min_samples_leaf=5,
+                            class_weight="balanced",
+                            random_state=42,
+                        ),
                     ),
-                ),
-            ]
-        ),
-        "hist_gradient_boosting": Pipeline(
-            [
-                ("imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
-                (
-                    "model",
-                    HistGradientBoostingClassifier(
-                        max_depth=4,
-                        learning_rate=0.05,
-                        max_iter=200,
-                        random_state=42,
+                ]
+            ),
+        },
+        "rf_simple_baseline": {
+            "features": simple_rf_feature_columns,
+            "pipeline": Pipeline(
+                [
+                    ("imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
+                    ("model", RandomForestClassifier(n_estimators=200, max_depth=6, random_state=42)),
+                ]
+            ),
+        },
+        "hist_gradient_boosting": {
+            "features": extended_feature_columns,
+            "pipeline": Pipeline(
+                [
+                    ("imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
+                    (
+                        "model",
+                        HistGradientBoostingClassifier(
+                            max_depth=4,
+                            learning_rate=0.05,
+                            max_iter=200,
+                            random_state=42,
+                        ),
                     ),
-                ),
-            ]
-        ),
+                ]
+            ),
+        },
     }
 
     classification_results: list[dict[str, Any]] = []
-    for name, model in classification_candidates.items():
-        model.fit(X_train, y_train)
-        probabilities = model.predict_proba(X_test)[:, 1]
+    for name, candidate in classification_candidates.items():
+        candidate_features = candidate["features"]
+        model = candidate["pipeline"]
+        model.fit(train_df[candidate_features], y_train)
+        probabilities = model.predict_proba(test_df[candidate_features])[:, 1]
         predictions = (probabilities >= 0.5).astype(int)
         classification_results.append(
             {
@@ -1295,13 +1328,17 @@ def train_models(config: PipelineConfig, paths: PipelinePaths) -> dict[str, Any]
                 "accuracy": float(accuracy_score(y_test, predictions)),
                 "balanced_accuracy": float(balanced_accuracy_score(y_test, predictions)),
                 "roc_auc": float(roc_auc_score(y_test, probabilities)),
-                "latest_up_probability": float(model.predict_proba(latest_features[feature_columns])[:, 1][0]),
+                "latest_up_probability": float(model.predict_proba(latest_features[candidate_features])[:, 1][0]),
+                "feature_count": len(candidate_features),
             }
         )
 
     best_classification = select_best_model(classification_results, ["balanced_accuracy", "roc_auc"])
-    direction_model = classification_candidates[best_classification["name"]]
-    direction_model.fit(training_data[feature_columns], training_data["target_up"])
+    direction_candidate = classification_candidates[best_classification["name"]]
+    direction_model = direction_candidate["pipeline"]
+    direction_feature_columns = direction_candidate["features"]
+    direction_model.fit(training_data[direction_feature_columns], training_data["target_up"])
+    regression_feature_columns = extended_feature_columns
 
     regression_candidates = {
         "ridge": Pipeline(
@@ -1329,21 +1366,21 @@ def train_models(config: PipelineConfig, paths: PipelinePaths) -> dict[str, Any]
 
     regression_results: list[dict[str, Any]] = []
     for name, model in regression_candidates.items():
-        model.fit(X_train, train_df["next_return"])
-        predictions = model.predict(X_test)
+        model.fit(train_df[regression_feature_columns], train_df["next_return"])
+        predictions = model.predict(test_df[regression_feature_columns])
         regression_results.append(
             {
                 "name": name,
                 "mae": float(mean_absolute_error(test_df["next_return"], predictions)),
                 "rmse": float(mean_squared_error(test_df["next_return"], predictions) ** 0.5),
                 "r2": float(r2_score(test_df["next_return"], predictions)),
-                "latest_predicted_return": float(model.predict(latest_features[feature_columns])[0]),
+                "latest_predicted_return": float(model.predict(latest_features[regression_feature_columns])[0]),
             }
         )
 
     best_regression = sorted(regression_results, key=lambda item: (item["mae"], item["rmse"]))[0]
     return_model = regression_candidates[best_regression["name"]]
-    return_model.fit(training_data[feature_columns], training_data["next_return"])
+    return_model.fit(training_data[regression_feature_columns], training_data["next_return"])
 
     ridge_equation_model = Pipeline(
         [
@@ -1351,13 +1388,13 @@ def train_models(config: PipelineConfig, paths: PipelinePaths) -> dict[str, Any]
             ("model", Ridge(alpha=1.0)),
         ]
     )
-    ridge_equation_model.fit(training_data[feature_columns], training_data["next_return"])
+    ridge_equation_model.fit(training_data[regression_feature_columns], training_data["next_return"])
     ridge_coefficients = ridge_equation_model.named_steps["model"].coef_
     ridge_intercept = ridge_equation_model.named_steps["model"].intercept_
 
     next_session_date = (latest_features["date"].iloc[0] + pd.offsets.BDay(1)).strftime("%Y-%m-%d")
-    latest_up_probability = float(direction_model.predict_proba(latest_features[feature_columns])[:, 1][0])
-    latest_predicted_return = float(return_model.predict(latest_features[feature_columns])[0])
+    latest_up_probability = float(direction_model.predict_proba(latest_features[direction_feature_columns])[:, 1][0])
+    latest_predicted_return = float(return_model.predict(latest_features[regression_feature_columns])[0])
 
     if latest_up_probability >= 0.6 and latest_predicted_return > 0.005:
         forecast_label = "偏强"
@@ -1368,20 +1405,22 @@ def train_models(config: PipelineConfig, paths: PipelinePaths) -> dict[str, Any]
 
     direction_payload = {
         "model": direction_model,
-        "features": feature_columns,
+        "features": direction_feature_columns,
         "selected_model": best_classification["name"],
         "evaluation": best_classification,
         "generated_at": datetime.now().isoformat(),
     }
     return_payload = {
         "model": return_model,
-        "features": feature_columns,
+        "features": regression_feature_columns,
         "selected_model": best_regression["name"],
         "evaluation": best_regression,
         "generated_at": datetime.now().isoformat(),
         "ridge_equation": {
             "intercept": float(ridge_intercept),
-            "coefficients": {feature: float(value) for feature, value in zip(feature_columns, ridge_coefficients)},
+            "coefficients": {
+                feature: float(value) for feature, value in zip(regression_feature_columns, ridge_coefficients)
+            },
         },
     }
     joblib.dump(direction_payload, paths.direction_model_path)
@@ -1459,7 +1498,11 @@ def train_models(config: PipelineConfig, paths: PipelinePaths) -> dict[str, Any]
             "baseline_accuracy": float(max(y_test.mean(), 1 - y_test.mean())),
             "candidates": classification_results,
             "selected_metrics": best_classification,
-            "feature_importance": extract_feature_importance(direction_model, feature_columns),
+            "feature_importance": extract_feature_importance(direction_model, direction_feature_columns),
+            "feature_sets": {
+                "extended": extended_feature_columns,
+                "rf_simple_baseline": simple_rf_feature_columns,
+            },
         },
         "regression": {
             "selected_model": best_regression["name"],
@@ -1467,7 +1510,9 @@ def train_models(config: PipelineConfig, paths: PipelinePaths) -> dict[str, Any]
             "selected_metrics": best_regression,
             "ridge_equation": {
                 "intercept": float(ridge_intercept),
-                "coefficients": {feature: float(value) for feature, value in zip(feature_columns, ridge_coefficients)},
+                "coefficients": {
+                    feature: float(value) for feature, value in zip(regression_feature_columns, ridge_coefficients)
+                },
             },
         },
         "forecast": {
@@ -1549,6 +1594,29 @@ def write_report(config: PipelineConfig, paths: PipelinePaths) -> Path:
     regression_metrics = metrics["regression"]["selected_metrics"]
     forecast = metrics["forecast"]
     baseline_accuracy = metrics["classification"]["baseline_accuracy"]
+    classification_candidates = metrics["classification"]["candidates"]
+    simple_rf_candidate = next(
+        (item for item in classification_candidates if item["name"] == "rf_simple_baseline"),
+        None,
+    )
+    model_display_names = {
+        "logistic": "Logistic Regression",
+        "random_forest": "Random Forest",
+        "rf_simple_baseline": "Random Forest (简化基线)",
+        "hist_gradient_boosting": "Hist Gradient Boosting",
+        "ridge": "Ridge Regression",
+        "random_forest_regressor": "Random Forest Regressor",
+    }
+    classification_candidate_lines = [
+        (
+            f"- `{model_display_names.get(item['name'], item['name'])}`:"
+            f" accuracy `{item['accuracy']:.4f}` |"
+            f" balanced_accuracy `{item['balanced_accuracy']:.4f}` |"
+            f" roc_auc `{item['roc_auc']:.4f}` |"
+            f" 特征数 `{item.get('feature_count', 0)}`"
+        )
+        for item in classification_candidates
+    ]
 
     if classifier_metrics["accuracy"] > baseline_accuracy:
         classifier_read = "分类模型在 plain accuracy 上略高于简单多数基线，但优势仍然很弱。"
@@ -1565,6 +1633,17 @@ def write_report(config: PipelineConfig, paths: PipelinePaths) -> Path:
         forecast_read = "上涨概率和预测收益都偏弱，短线更像偏谨慎信号。"
     else:
         forecast_read = "概率和预测收益都靠近中轴，这不是明确突破或转弱，更像震荡偏中性。"
+
+    if simple_rf_candidate is None:
+        simple_rf_read = "这次没有成功写出简化随机森林基线结果。"
+    elif simple_rf_candidate["accuracy"] >= classifier_metrics["accuracy"]:
+        simple_rf_read = (
+            "黄金项目启发出的简化随机森林基线并不比当前最优分类模型差，说明少量价量 + 新闻聚合特征已经带出了一部分信号。"
+        )
+    else:
+        simple_rf_read = (
+            "黄金项目风格的简化随机森林基线能作为对照，但当前还是扩展特征模型更强一些，说明财务和多源新闻统计仍然提供了补充信息。"
+        )
 
     report = f"""# 当升科技(300073) 两年新闻与股价 ETL + ML 分析
 
@@ -1618,6 +1697,8 @@ def write_report(config: PipelineConfig, paths: PipelinePaths) -> Path:
 - 测试集平衡准确率: `{classifier_metrics["balanced_accuracy"]:.4f}`
 - 测试集 ROC AUC: `{classifier_metrics["roc_auc"]:.4f}`
 - 同期简单基线(永远猜多数方向): `{metrics["classification"]["baseline_accuracy"]:.4f}`
+- 分类候选对比:
+{chr(10).join(classification_candidate_lines)}
 - 回归模型最终选择: `{metrics["regression"]["selected_model"]}`
 - 回归 MAE: `{regression_metrics["mae"]:.4f}`
 - 回归 RMSE: `{regression_metrics["rmse"]:.4f}`
@@ -1626,6 +1707,7 @@ def write_report(config: PipelineConfig, paths: PipelinePaths) -> Path:
 解释:
 
 - {classifier_read}
+- {simple_rf_read}
 - 回归模型的 `R²` 仍为负值，说明它对下一日精确收益率的解释力不足。
 - 所以这套结果更适合用来做**辅助观察**，不适合单独作为买卖依据。
 

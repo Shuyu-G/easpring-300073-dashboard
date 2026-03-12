@@ -1091,6 +1091,7 @@ def build_javascript() -> str:
             "chart.roe": "ROE",
             "modelName.logistic": "Logistic Regression",
             "modelName.random_forest": "Random Forest",
+            "modelName.rf_simple_baseline": "随机森林(简化基线)",
             "modelName.hist_gradient_boosting": "Hist Gradient Boosting",
             "modelName.ridge": "Ridge Regression",
             "modelName.random_forest_regressor": "Random Forest Regressor"
@@ -1221,6 +1222,7 @@ def build_javascript() -> str:
             "chart.roe": "ROE",
             "modelName.logistic": "Logistic Regression",
             "modelName.random_forest": "Random Forest",
+            "modelName.rf_simple_baseline": "Random Forest (simple baseline)",
             "modelName.hist_gradient_boosting": "Hist Gradient Boosting",
             "modelName.ridge": "Ridge Regression",
             "modelName.random_forest_regressor": "Random Forest Regressor"
@@ -1351,6 +1353,7 @@ def build_javascript() -> str:
             "chart.roe": "ROE",
             "modelName.logistic": "Logistische Regression",
             "modelName.random_forest": "Random Forest",
+            "modelName.rf_simple_baseline": "Random Forest (einfache Basislinie)",
             "modelName.hist_gradient_boosting": "Histogram Gradient Boosting",
             "modelName.ridge": "Ridge-Regression",
             "modelName.random_forest_regressor": "Random-Forest-Regressor"
