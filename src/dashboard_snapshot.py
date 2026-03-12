@@ -12,10 +12,10 @@ from plotly.offline import get_plotlyjs
 
 
 SOURCE_LABELS = {
-    "disclosure": "公司公告",
-    "research": "券商研报",
-    "news": "个股新闻",
-    "web_news": "外部媒体",
+    "disclosure": "公司披露",
+    "research": "卖方研报",
+    "news": "市场新闻",
+    "web_news": "媒体报道",
 }
 
 
@@ -93,14 +93,23 @@ def render_head(title: str, page: str, asset_version: str) -> str:
               </div>
               <div class="topbar-meta">
                 <nav class="topnav">{render_nav(page)}</nav>
-                <label class="lang-switcher" for="lang-select">
-                  <span data-i18n="lang.label">语言</span>
-                  <select id="lang-select" aria-label="Language">
-                    <option value="zh">中文</option>
-                    <option value="en">English</option>
-                    <option value="de">Deutsch</option>
-                  </select>
-                </label>
+                <div class="lang-switcher" role="group" aria-label="Language switcher">
+                  <span class="lang-caption" data-i18n="lang.label">语言</span>
+                  <div class="lang-buttons">
+                    <button type="button" class="lang-button" data-lang="zh" aria-label="中文">
+                      <span class="flag" aria-hidden="true">🇨🇳</span>
+                      <span>中文</span>
+                    </button>
+                    <button type="button" class="lang-button" data-lang="en" aria-label="English">
+                      <span class="flag" aria-hidden="true">🇺🇸</span>
+                      <span>English</span>
+                    </button>
+                    <button type="button" class="lang-button" data-lang="de" aria-label="Deutsch">
+                      <span class="flag" aria-hidden="true">🇩🇪</span>
+                      <span>Deutsch</span>
+                    </button>
+                  </div>
+                </div>
               </div>
             </header>
         """
@@ -298,7 +307,13 @@ def build_stylesheet() -> str:
           --down: #1f6f5f;
           --neutral: #58606b;
           --shadow: 0 18px 50px rgba(86, 96, 107, 0.08);
+          --shadow-strong: 0 24px 66px rgba(86, 96, 107, 0.14);
           --radius: 22px;
+          --ease: cubic-bezier(0.22, 1, 0.36, 1);
+        }
+
+        html {
+          scroll-behavior: smooth;
         }
 
         * {
@@ -313,11 +328,17 @@ def build_stylesheet() -> str:
             radial-gradient(circle at top right, rgba(198, 90, 46, 0.10), transparent 24%),
             radial-gradient(circle at top left, rgba(31, 111, 95, 0.10), transparent 18%),
             linear-gradient(180deg, #f3eee4 0%, #f8f5ef 46%, #f1ebdf 100%);
+          overflow-x: hidden;
         }
 
         a {
           color: inherit;
           text-decoration: none;
+        }
+
+        button,
+        select {
+          font-family: inherit;
         }
 
         .app-shell {
@@ -332,6 +353,7 @@ def build_stylesheet() -> str:
           justify-content: space-between;
           gap: 18px;
           margin-bottom: 18px;
+          animation: rise-in 0.72s var(--ease) both;
         }
 
         .topbar h1 {
@@ -378,32 +400,89 @@ def build_stylesheet() -> str:
           color: #38413d;
           font-size: 0.92rem;
           font-weight: 700;
+          transition:
+            transform 180ms var(--ease),
+            box-shadow 180ms var(--ease),
+            border-color 180ms var(--ease),
+            background 180ms var(--ease);
         }
 
         .nav-link.active {
           background: linear-gradient(135deg, rgba(198, 90, 46, 0.12), rgba(31, 111, 95, 0.08));
           border-color: rgba(198, 90, 46, 0.35);
+          box-shadow: inset 0 0 0 1px rgba(198, 90, 46, 0.08);
+        }
+
+        .nav-link:hover {
+          transform: translateY(-2px);
+          box-shadow: 0 14px 28px rgba(86, 96, 107, 0.10);
+          border-color: rgba(198, 90, 46, 0.28);
         }
 
         .lang-switcher {
-          display: inline-flex;
+          display: flex;
           align-items: center;
-          gap: 8px;
-          padding: 8px 12px;
-          border-radius: 999px;
-          border: 1px solid var(--line);
-          background: rgba(251, 248, 243, 0.92);
-          font-size: 0.9rem;
-          color: #38413d;
+          gap: 12px;
+          padding: 10px 12px 10px 14px;
+          border-radius: 20px;
+          border: 1px solid rgba(198, 90, 46, 0.20);
+          background: linear-gradient(135deg, rgba(251, 248, 243, 0.95), rgba(247, 241, 233, 0.98));
+          box-shadow: 0 20px 40px rgba(86, 96, 107, 0.08);
+        }
+
+        .lang-caption {
+          font-size: 0.72rem;
+          letter-spacing: 0.12em;
+          text-transform: uppercase;
+          color: var(--muted);
           font-weight: 700;
         }
 
-        .lang-switcher select {
-          min-width: 110px;
-          border: 1px solid rgba(216, 207, 192, 0.9);
+        .lang-buttons {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+
+        .lang-button {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          border: 1px solid rgba(216, 207, 192, 0.95);
           border-radius: 999px;
-          padding: 6px 10px;
-          background: rgba(255, 255, 255, 0.9);
+          padding: 8px 12px;
+          background: rgba(255, 255, 255, 0.82);
+          color: #38413d;
+          font-size: 0.9rem;
+          font-weight: 700;
+          cursor: pointer;
+          transition:
+            transform 180ms var(--ease),
+            box-shadow 180ms var(--ease),
+            border-color 180ms var(--ease),
+            background 180ms var(--ease);
+        }
+
+        .lang-button:hover {
+          transform: translateY(-2px);
+          box-shadow: 0 14px 28px rgba(86, 96, 107, 0.12);
+          border-color: rgba(198, 90, 46, 0.28);
+        }
+
+        .lang-button.active {
+          background: linear-gradient(135deg, rgba(198, 90, 46, 0.18), rgba(31, 111, 95, 0.12));
+          border-color: rgba(198, 90, 46, 0.35);
+          color: #1f2622;
+          box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.55), 0 16px 32px rgba(86, 96, 107, 0.11);
+        }
+
+        .lang-button .flag {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 1.2rem;
+          font-size: 1rem;
         }
 
         .banner {
@@ -414,6 +493,7 @@ def build_stylesheet() -> str:
           background: rgba(251, 248, 243, 0.9);
           box-shadow: var(--shadow);
           display: none;
+          animation: rise-in 0.72s var(--ease) both;
         }
 
         .banner.show {
@@ -431,6 +511,41 @@ def build_stylesheet() -> str:
           border-radius: var(--radius);
           background: rgba(251, 248, 243, 0.93);
           box-shadow: var(--shadow);
+          position: relative;
+          overflow: hidden;
+          transition:
+            transform 220ms var(--ease),
+            box-shadow 220ms var(--ease),
+            border-color 220ms var(--ease),
+            background 220ms var(--ease);
+          animation: rise-in 0.76s var(--ease) both;
+        }
+
+        .hero::before,
+        .panel::before,
+        .news-card::before,
+        .highlight-card::before {
+          content: "";
+          position: absolute;
+          inset: 0;
+          background: linear-gradient(110deg, transparent 0%, rgba(255, 255, 255, 0.16) 45%, transparent 100%);
+          transform: translateX(-125%);
+          transition: transform 520ms var(--ease);
+          pointer-events: none;
+        }
+
+        .hero:hover,
+        .panel:hover {
+          transform: translateY(-3px);
+          box-shadow: var(--shadow-strong);
+          border-color: rgba(198, 90, 46, 0.22);
+        }
+
+        .hero:hover::before,
+        .panel:hover::before,
+        .news-card:hover::before,
+        .highlight-card:hover::before {
+          transform: translateX(125%);
         }
 
         .hero {
@@ -461,6 +576,16 @@ def build_stylesheet() -> str:
           padding: 18px;
           background: linear-gradient(160deg, rgba(198, 90, 46, 0.14), rgba(31, 111, 95, 0.08) 82%);
           border: 1px solid rgba(198, 90, 46, 0.22);
+          position: relative;
+          overflow: hidden;
+          transition: transform 220ms var(--ease), box-shadow 220ms var(--ease), border-color 220ms var(--ease);
+          animation: pulse-glow 8.5s ease-in-out infinite;
+        }
+
+        .signal-meter:hover {
+          transform: translateY(-2px);
+          box-shadow: 0 22px 48px rgba(198, 90, 46, 0.14);
+          border-color: rgba(198, 90, 46, 0.30);
         }
 
         .signal-meter .label {
@@ -503,6 +628,16 @@ def build_stylesheet() -> str:
         .metric-card {
           padding: 16px;
           min-height: 126px;
+          transition:
+            transform 220ms var(--ease),
+            box-shadow 220ms var(--ease),
+            border-color 220ms var(--ease),
+            background 220ms var(--ease);
+        }
+
+        .metric-card:hover {
+          transform: translateY(-3px);
+          box-shadow: 0 24px 50px rgba(86, 96, 107, 0.12);
         }
 
         .metric-label {
@@ -560,6 +695,17 @@ def build_stylesheet() -> str:
           color: #38413d;
           font: inherit;
           cursor: pointer;
+          transition:
+            transform 180ms var(--ease),
+            box-shadow 180ms var(--ease),
+            border-color 180ms var(--ease),
+            background 180ms var(--ease);
+        }
+
+        .button:hover {
+          transform: translateY(-2px);
+          box-shadow: 0 14px 28px rgba(86, 96, 107, 0.10);
+          border-color: rgba(198, 90, 46, 0.26);
         }
 
         .button.active {
@@ -574,6 +720,18 @@ def build_stylesheet() -> str:
           background: #fff;
           color: #37403c;
           font: inherit;
+          transition:
+            transform 180ms var(--ease),
+            box-shadow 180ms var(--ease),
+            border-color 180ms var(--ease);
+        }
+
+        select:hover,
+        select:focus {
+          transform: translateY(-1px);
+          box-shadow: 0 12px 22px rgba(86, 96, 107, 0.08);
+          border-color: rgba(198, 90, 46, 0.26);
+          outline: none;
         }
 
         .chart {
@@ -593,6 +751,21 @@ def build_stylesheet() -> str:
           border-radius: 18px;
           padding: 14px 15px;
           background: rgba(255, 255, 255, 0.75);
+          position: relative;
+          overflow: hidden;
+          transition:
+            transform 220ms var(--ease),
+            box-shadow 220ms var(--ease),
+            border-color 220ms var(--ease),
+            background 220ms var(--ease);
+          animation: rise-in 0.8s var(--ease) both;
+        }
+
+        .news-card:hover,
+        .highlight-card:hover {
+          transform: translateY(-3px);
+          box-shadow: 0 20px 42px rgba(86, 96, 107, 0.11);
+          border-color: rgba(198, 90, 46, 0.22);
         }
 
         .pill-row {
@@ -644,6 +817,16 @@ def build_stylesheet() -> str:
           font-size: 0.84rem;
         }
 
+        .news-card h3 a,
+        .highlight-card h3 a {
+          transition: color 160ms var(--ease);
+        }
+
+        .news-card h3 a:hover,
+        .highlight-card h3 a:hover {
+          color: var(--up);
+        }
+
         .table-wrap {
           overflow-x: auto;
           border-radius: 16px;
@@ -681,12 +864,33 @@ def build_stylesheet() -> str:
           margin-top: 18px;
           color: var(--muted);
           font-size: 0.84rem;
+          animation: rise-in 0.86s var(--ease) both;
         }
 
         .empty-state {
           color: var(--muted);
           font-size: 0.9rem;
           padding: 14px 0;
+        }
+
+        @keyframes rise-in {
+          from {
+            opacity: 0;
+            transform: translateY(18px);
+          }
+          to {
+            opacity: 1;
+            transform: translateY(0);
+          }
+        }
+
+        @keyframes pulse-glow {
+          0%, 100% {
+            box-shadow: 0 16px 36px rgba(198, 90, 46, 0.06);
+          }
+          50% {
+            box-shadow: 0 22px 48px rgba(31, 111, 95, 0.10);
+          }
         }
 
         @media (max-width: 1080px) {
@@ -707,6 +911,28 @@ def build_stylesheet() -> str:
 
           .topbar-meta {
             justify-content: flex-start;
+          }
+
+          .lang-switcher {
+            width: 100%;
+            justify-content: space-between;
+          }
+
+          .lang-buttons {
+            justify-content: flex-start;
+          }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+          html {
+            scroll-behavior: auto;
+          }
+
+          *,
+          *::before,
+          *::after {
+            animation: none !important;
+            transition: none !important;
           }
         }
         """
@@ -789,13 +1015,13 @@ def build_javascript() -> str:
             "impact.positive": "偏利多",
             "impact.neutral": "中性",
             "impact.negative": "偏利空",
-            "signal.strong": "偏强",
-            "signal.weak": "偏弱",
-            "signal.neutral": "震荡偏中性",
-            "source.disclosure": "公司公告",
-            "source.research": "券商研报",
-            "source.news": "个股新闻",
-            "source.web_news": "外部媒体",
+            "signal.strong": "偏积极",
+            "signal.weak": "偏谨慎",
+            "signal.neutral": "中性偏震荡",
+            "source.disclosure": "公司披露",
+            "source.research": "卖方研报",
+            "source.news": "市场新闻",
+            "source.web_news": "媒体报道",
             "home.hero.kicker": "当日信号",
             "home.price.title": "股价与成交量",
             "home.price.subtitle": "保留本地版的窗口切换，观察价格、量能和相对强弱。",
@@ -919,13 +1145,13 @@ def build_javascript() -> str:
             "impact.positive": "Positive",
             "impact.neutral": "Neutral",
             "impact.negative": "Negative",
-            "signal.strong": "Bullish bias",
-            "signal.weak": "Bearish bias",
-            "signal.neutral": "Range-bound / neutral",
-            "source.disclosure": "Company disclosure",
-            "source.research": "Broker research",
-            "source.news": "Stock news",
-            "source.web_news": "External media",
+            "signal.strong": "Constructive",
+            "signal.weak": "Cautious",
+            "signal.neutral": "Neutral / range-bound",
+            "source.disclosure": "Company filings",
+            "source.research": "Sell-side research",
+            "source.news": "Company news",
+            "source.web_news": "Press coverage",
             "home.hero.kicker": "Daily signal",
             "home.price.title": "Price and volume",
             "home.price.subtitle": "Keep the local dashboard window switching and inspect price action, liquidity, and relative strength.",
@@ -1049,13 +1275,13 @@ def build_javascript() -> str:
             "impact.positive": "Positiv",
             "impact.neutral": "Neutral",
             "impact.negative": "Negativ",
-            "signal.strong": "Positiver Bias",
-            "signal.weak": "Negativer Bias",
-            "signal.neutral": "Seitwärts / neutral",
-            "source.disclosure": "Unternehmensmeldung",
-            "source.research": "Broker-Research",
-            "source.news": "Aktiennachricht",
-            "source.web_news": "Externe Medien",
+            "signal.strong": "Konstruktiv",
+            "signal.weak": "Vorsichtig",
+            "signal.neutral": "Neutral / Seitwärtsphase",
+            "source.disclosure": "Unternehmensmeldungen",
+            "source.research": "Analysten-Research",
+            "source.news": "Unternehmensnachrichten",
+            "source.web_news": "Presseberichte",
             "home.hero.kicker": "Tagessignal",
             "home.price.title": "Kurs und Volumen",
             "home.price.subtitle": "Behalte die Zeitfenster-Umschaltung des lokalen Dashboards bei und beobachte Kursverlauf, Liquidität und relative Stärke.",
@@ -1181,14 +1407,18 @@ def build_javascript() -> str:
         }
 
         function initLanguageSelector() {
-          const select = document.getElementById("lang-select");
-          if (!select) return;
-          select.value = currentLang;
-          select.addEventListener("change", () => {
-            const next = select.value;
-            if (!I18N[next]) return;
-            localStorage.setItem("dashboard_lang", next);
-            window.location.reload();
+          const buttons = Array.from(document.querySelectorAll(".lang-button[data-lang]"));
+          if (!buttons.length) return;
+          buttons.forEach((button) => {
+            const isActive = button.dataset.lang === currentLang;
+            button.classList.toggle("active", isActive);
+            button.setAttribute("aria-pressed", String(isActive));
+            button.addEventListener("click", () => {
+              const next = button.dataset.lang;
+              if (!next || !I18N[next]) return;
+              localStorage.setItem("dashboard_lang", next);
+              window.location.reload();
+            });
           });
         }
 
@@ -1267,6 +1497,63 @@ def build_javascript() -> str:
         function modelLabel(name) {
           if (!name) return t("common.na");
           return t(`modelName.${name}`);
+        }
+
+        function tracePointCount(trace) {
+          if (Array.isArray(trace?.x) && trace.x.length) return trace.x.length;
+          if (Array.isArray(trace?.y) && trace.y.length) return trace.y.length;
+          return 0;
+        }
+
+        function setBarHoverState(chart, hoveredPoint = null) {
+          (chart.data || []).forEach((trace, traceIndex) => {
+            if (trace?.type !== "bar") return;
+            const count = tracePointCount(trace);
+            if (!count) return;
+            const isHoveredTrace = hoveredPoint && hoveredPoint.curveNumber === traceIndex;
+            const opacity = Array.from({ length: count }, (_, pointIndex) => {
+              if (!hoveredPoint) return 0.88;
+              if (isHoveredTrace && pointIndex === hoveredPoint.pointNumber) return 1;
+              if (isHoveredTrace) return 0.58;
+              return 0.42;
+            });
+            const lineWidth = Array.from({ length: count }, (_, pointIndex) => {
+              if (!hoveredPoint) return 0;
+              if (isHoveredTrace && pointIndex === hoveredPoint.pointNumber) return 2.4;
+              return 0.8;
+            });
+            const lineColor = Array.from({ length: count }, (_, pointIndex) => {
+              if (!hoveredPoint) return "rgba(255,255,255,0)";
+              if (isHoveredTrace && pointIndex === hoveredPoint.pointNumber) return "rgba(22, 26, 24, 0.42)";
+              return "rgba(22, 26, 24, 0.12)";
+            });
+            Plotly.restyle(
+              chart,
+              {
+                "marker.opacity": [opacity],
+                "marker.line.width": [lineWidth],
+                "marker.line.color": [lineColor],
+              },
+              [traceIndex]
+            );
+          });
+        }
+
+        function attachBarHoverEffects(chart) {
+          if (!chart) return;
+          if (typeof chart.removeAllListeners === "function") {
+            chart.removeAllListeners("plotly_hover");
+            chart.removeAllListeners("plotly_unhover");
+          }
+          setBarHoverState(chart, null);
+          chart.on("plotly_hover", (eventData) => {
+            const hoveredBar = eventData?.points?.find((point) => point?.data?.type === "bar");
+            if (!hoveredBar) return;
+            setBarHoverState(chart, hoveredBar);
+          });
+          chart.on("plotly_unhover", () => {
+            setBarHoverState(chart, null);
+          });
         }
 
         function formatEquationSummary(equation) {
@@ -1413,13 +1700,19 @@ def build_javascript() -> str:
               paper_bgcolor: "rgba(0,0,0,0)",
               plot_bgcolor: "rgba(0,0,0,0)",
               margin: { l: 42, r: 42, t: 16, b: 40 },
+              hovermode: "x unified",
+              hoverlabel: {
+                bgcolor: "rgba(251, 248, 243, 0.96)",
+                bordercolor: "rgba(198, 90, 46, 0.18)",
+                font: { color: "#161a18" },
+              },
               xaxis: { showgrid: false },
               yaxis: { title: t("chart.closeAxis"), gridcolor: "rgba(216, 207, 192, 0.35)" },
               yaxis2: { title: t("chart.volumeAxis"), overlaying: "y", side: "right", showgrid: false },
               legend: { orientation: "h", y: 1.1 },
             },
             { responsive: true, displayModeBar: false }
-          );
+          ).then(() => attachBarHoverEffects(chart));
 
           const performanceChart = document.getElementById("performance-chart");
           if (performanceChart) {
@@ -1447,6 +1740,12 @@ def build_javascript() -> str:
                 paper_bgcolor: "rgba(0,0,0,0)",
                 plot_bgcolor: "rgba(0,0,0,0)",
                 margin: { l: 42, r: 18, t: 16, b: 40 },
+                hovermode: "x unified",
+                hoverlabel: {
+                  bgcolor: "rgba(251, 248, 243, 0.96)",
+                  bordercolor: "rgba(31, 111, 95, 0.18)",
+                  font: { color: "#161a18" },
+                },
                 xaxis: { showgrid: false },
                 yaxis: { title: t("chart.normIndex"), gridcolor: "rgba(216, 207, 192, 0.35)" },
                 legend: { orientation: "h", y: 1.12 },
@@ -1524,11 +1823,16 @@ def build_javascript() -> str:
               paper_bgcolor: "rgba(0,0,0,0)",
               plot_bgcolor: "rgba(0,0,0,0)",
               margin: { l: 42, r: 18, t: 12, b: 40 },
+              hoverlabel: {
+                bgcolor: "rgba(251, 248, 243, 0.96)",
+                bordercolor: "rgba(198, 90, 46, 0.18)",
+                font: { color: "#161a18" },
+              },
               xaxis: { showgrid: false },
               yaxis: { gridcolor: "rgba(216, 207, 192, 0.35)" },
             },
             { responsive: true, displayModeBar: false }
-          );
+          ).then(() => attachBarHoverEffects(chart));
         }
 
         function renderNewsFeed(data, options = {}) {
@@ -1651,12 +1955,17 @@ def build_javascript() -> str:
                 paper_bgcolor: "rgba(0,0,0,0)",
                 plot_bgcolor: "rgba(0,0,0,0)",
                 margin: { l: 42, r: 18, t: 16, b: 60 },
+                hoverlabel: {
+                  bgcolor: "rgba(251, 248, 243, 0.96)",
+                  bordercolor: "rgba(198, 90, 46, 0.18)",
+                  font: { color: "#161a18" },
+                },
                 xaxis: { tickangle: -18, showgrid: false },
                 yaxis: { gridcolor: "rgba(216, 207, 192, 0.35)" },
                 legend: { orientation: "h", y: 1.15 },
               },
               { responsive: true, displayModeBar: false }
-            );
+            ).then(() => attachBarHoverEffects(compareChart));
           }
 
           const featureChart = document.getElementById("feature-chart");
@@ -1677,11 +1986,16 @@ def build_javascript() -> str:
                 paper_bgcolor: "rgba(0,0,0,0)",
                 plot_bgcolor: "rgba(0,0,0,0)",
                 margin: { l: 150, r: 18, t: 16, b: 40 },
+                hoverlabel: {
+                  bgcolor: "rgba(251, 248, 243, 0.96)",
+                  bordercolor: "rgba(88, 96, 107, 0.18)",
+                  font: { color: "#161a18" },
+                },
                 xaxis: { gridcolor: "rgba(216, 207, 192, 0.35)" },
                 yaxis: { automargin: true },
               },
               { responsive: true, displayModeBar: false }
-            );
+            ).then(() => attachBarHoverEffects(featureChart));
           }
 
           const summary = document.getElementById("model-summary");
@@ -1737,12 +2051,18 @@ def build_javascript() -> str:
                 paper_bgcolor: "rgba(0,0,0,0)",
                 plot_bgcolor: "rgba(0,0,0,0)",
                 margin: { l: 42, r: 18, t: 16, b: 40 },
+                hovermode: "x unified",
+                hoverlabel: {
+                  bgcolor: "rgba(251, 248, 243, 0.96)",
+                  bordercolor: "rgba(198, 90, 46, 0.18)",
+                  font: { color: "#161a18" },
+                },
                 xaxis: { showgrid: false },
                 yaxis: { gridcolor: "rgba(216, 207, 192, 0.35)" },
                 legend: { orientation: "h", y: 1.14 },
               },
               { responsive: true, displayModeBar: false }
-            );
+            ).then(() => attachBarHoverEffects(profitChart));
           }
 
           const ratioChart = document.getElementById("fundamentals-ratio-chart");
@@ -1779,6 +2099,12 @@ def build_javascript() -> str:
                 paper_bgcolor: "rgba(0,0,0,0)",
                 plot_bgcolor: "rgba(0,0,0,0)",
                 margin: { l: 42, r: 18, t: 16, b: 40 },
+                hovermode: "x unified",
+                hoverlabel: {
+                  bgcolor: "rgba(251, 248, 243, 0.96)",
+                  bordercolor: "rgba(31, 111, 95, 0.18)",
+                  font: { color: "#161a18" },
+                },
                 xaxis: { showgrid: false },
                 yaxis: { gridcolor: "rgba(216, 207, 192, 0.35)" },
                 legend: { orientation: "h", y: 1.15 },
